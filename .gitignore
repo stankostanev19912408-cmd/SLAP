@@ -1,0 +1,29 @@
+[Ll]ibrary/
+[Tt]emp/
+[Oo]bj/
+[Bb]uild/
+[Bb]uilds/
+[Ll]ogs/
+[Uu]ser[Ss]ettings/
+MemoryCaptures/
+.vscode/
+.idea/
+*.csproj
+*.sln
+# backups / extra copies
+backup*/
+_backups*/
+*.bak
+*.tmp
+
+# Unity generated / caches
+[Uu]serSettings/
+[Ll]ogs/
+backup*/
+_backup*/
+_backups*/
+**/backup*/
+**/_backup*/
+**/_backups*/
+Version1/
+**/Version1/
