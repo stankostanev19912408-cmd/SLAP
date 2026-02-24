@@ -27,3 +27,8 @@ _backups*/
 **/_backups*/
 Version1/
 **/Version1/
+
+# local scratch / reports
+_tmp*
+**/_tmp*
+ОТЧЁТ*.txt
