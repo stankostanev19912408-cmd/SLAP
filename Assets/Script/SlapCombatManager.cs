@@ -67,6 +67,8 @@ public class SlapCombatManager : MonoBehaviour
     [SerializeField] private float perfectBlockMaxHoldSeconds = 1f;
     [SerializeField] private float perfectBlockMinHold01 = 0.98f;
     [SerializeField] private float perfectTextSeconds = 0.8f;
+    [Header("Debug")]
+    [SerializeField] private bool verboseCombatLogs = false;
 
     private SlapMechanics player;
     private SlapMechanics ai;
@@ -487,7 +489,7 @@ public class SlapCombatManager : MonoBehaviour
                 }
                 else
                 {
-                    Debug.Log($"[SlapCombat] Missed-block reaction on '{pendingHitDefender.gameObject.name}', state='{reactionName}', len={reactionLen:0.00}s");
+                    LogCombat($"[SlapCombat] Missed-block reaction on '{pendingHitDefender.gameObject.name}', state='{reactionName}', len={reactionLen:0.00}s");
                 }
             }
         }
@@ -591,6 +593,10 @@ public class SlapCombatManager : MonoBehaviour
         if (!attachMainCameraToIdleHead) return;
         if (cachedMainCamera == null) cachedMainCamera = Camera.main;
         if (cachedMainCamera == null) return;
+        // Avoid double-driving the same camera transform when dedicated
+        // first-person controller is already active on the camera.
+        var firstPersonController = cachedMainCamera.GetComponent<MainCameraFirstPerson>();
+        if (firstPersonController != null && firstPersonController.enabled) return;
         if (!cachedMainCameraBaseFovSet)
         {
             cachedMainCameraBaseFov = cachedMainCamera.fieldOfView;
@@ -1549,7 +1555,7 @@ public class SlapCombatManager : MonoBehaviour
             }
             else
             {
-                Debug.Log($"[SlapCombat] Intro start on '{attacker.gameObject.name}', state='{firstAttackerIntroName}', len={attackerIntroLen:0.00}s");
+                LogCombat($"[SlapCombat] Intro start on '{attacker.gameObject.name}', state='{firstAttackerIntroName}', len={attackerIntroLen:0.00}s");
             }
         }
 
@@ -1565,7 +1571,7 @@ public class SlapCombatManager : MonoBehaviour
             }
             else
             {
-                Debug.Log($"[SlapCombat] Intro start on '{defender.gameObject.name}', state='{firstDefenderIntroName}', len={defenderIntroLen:0.00}s");
+                LogCombat($"[SlapCombat] Intro start on '{defender.gameObject.name}', state='{firstDefenderIntroName}', len={defenderIntroLen:0.00}s");
             }
         }
 
@@ -1673,7 +1679,7 @@ public class SlapCombatManager : MonoBehaviour
         }
         else if (playMissedRightBlockReaction)
         {
-            Debug.Log($"[SlapCombat] Missed-right-block reaction ready from '{usedPath}', clip='{resolvedMissedRightBlockReactionClip.name}'.");
+            LogCombat($"[SlapCombat] Missed-right-block reaction ready from '{usedPath}', clip='{resolvedMissedRightBlockReactionClip.name}'.");
         }
 #endif
     }
@@ -1703,7 +1709,7 @@ public class SlapCombatManager : MonoBehaviour
         }
         else if (playMissedRightBlockReaction)
         {
-            Debug.Log($"[SlapCombat] Missed-left-block reaction ready from '{usedPath}', clip='{resolvedMissedLeftBlockReactionClip.name}'.");
+            LogCombat($"[SlapCombat] Missed-left-block reaction ready from '{usedPath}', clip='{resolvedMissedLeftBlockReactionClip.name}'.");
         }
 #endif
     }
@@ -1733,7 +1739,7 @@ public class SlapCombatManager : MonoBehaviour
         }
         else if (playMissedRightBlockReaction)
         {
-            Debug.Log($"[SlapCombat] Missed-slapup-block reaction ready from '{usedPath}', clip='{resolvedMissedSlapUpBlockReactionClip.name}'.");
+            LogCombat($"[SlapCombat] Missed-slapup-block reaction ready from '{usedPath}', clip='{resolvedMissedSlapUpBlockReactionClip.name}'.");
         }
 #endif
     }
@@ -1763,9 +1769,15 @@ public class SlapCombatManager : MonoBehaviour
         }
         else if (playMissedRightBlockReaction)
         {
-            Debug.Log($"[SlapCombat] Missed-slapercut-block reaction ready from '{usedPath}', clip='{resolvedMissedSlapErcutBlockReactionClip.name}'.");
+            LogCombat($"[SlapCombat] Missed-slapercut-block reaction ready from '{usedPath}', clip='{resolvedMissedSlapErcutBlockReactionClip.name}'.");
         }
 #endif
+    }
+
+    private void LogCombat(string message)
+    {
+        if (!verboseCombatLogs) return;
+        Debug.Log(message);
     }
 
     private void StartBattle()
