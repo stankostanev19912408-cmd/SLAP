@@ -140,6 +140,14 @@ public class SlapMechanics : MonoBehaviour
     [SerializeField] private bool lockHipsRotation = true;
     [SerializeField] private bool lockLowerBodyRotation = true;
     [SerializeField] private bool lockFeetLocalPosition = true;
+    [SerializeField] private bool lockToesOnGround = true;
+    [SerializeField] private float legsLockAcquireSeconds = 0.24f;
+    [SerializeField] private float legsLockReleaseSeconds = 1.8f;
+    [SerializeField] private float toesLockAcquireSeconds = 1.8f;
+    [SerializeField] private float toesLockReleaseSeconds = 0.36f;
+    [SerializeField] private bool hardLockShins = true;
+    [SerializeField] private bool smoothKneeLock = true;
+    [SerializeField] private float kneeLockSmoothing = 12f;
     [SerializeField] private bool lockLegsOnlyInIdle = true;
     [SerializeField] private bool lockBodyDuringAttackPhases = true;
     [SerializeField] private bool lockDefenderBodyDuringBlock = true;
@@ -251,10 +259,14 @@ public class SlapMechanics : MonoBehaviour
     private Vector3 rightFootStartLocalPos;
     private Vector3 leftToesStartLocalPos;
     private Vector3 rightToesStartLocalPos;
+    private Vector3 leftToesStartWorldPos;
+    private Vector3 rightToesStartWorldPos;
     private Quaternion leftFootStartLocalRot;
     private Quaternion rightFootStartLocalRot;
     private Quaternion leftToesStartLocalRot;
     private Quaternion rightToesStartLocalRot;
+    private float legsLockBlend = 1f;
+    private float toesLockBlend;
     private bool feetStartLocalPosPinned;
     private bool startupLegReferenceCalibrated;
     private int startupLegCalibrationFrameCounter;
@@ -608,8 +620,14 @@ public class SlapMechanics : MonoBehaviour
             ApplyIntroBodyExceptHeadLock();
             ApplyIntroShoulderLock();
             // Freeze everything below the waist during intro.
+            legsLockBlend = 1f;
+            toesLockBlend = lockToesOnGround ? 1f : 0f;
             KeepLowerBodyRotationStable();
             KeepFeetLocalPositionStable();
+            if (lockToesOnGround)
+            {
+                KeepToesWorldPositionStable();
+            }
             return;
         }
         TryCalibrateLegReferenceOnStartup();
@@ -620,20 +638,37 @@ public class SlapMechanics : MonoBehaviour
         bool forceFeetLockDuringWindup =
             attackPhase == AttackPhase.WindupActive ||
             attackPhase == AttackPhase.ReturningAfterWindup ||
-            swipeActive ||
             windupTriggered ||
             pendingDir != Dir.None;
-        if (lockLowerBodyRotation && keepLegsLocked)
+
+        float targetLegsBlend = keepLegsLocked ? 1f : 0f;
+        float legsBlendSeconds = targetLegsBlend > legsLockBlend
+            ? Mathf.Max(0.01f, legsLockAcquireSeconds)
+            : Mathf.Max(0.01f, legsLockReleaseSeconds);
+        legsLockBlend = Mathf.MoveTowards(legsLockBlend, targetLegsBlend, Time.deltaTime / legsBlendSeconds);
+
+        if (lockLowerBodyRotation && legsLockBlend > 0.0001f)
         {
-            KeepLowerBodyRotationStable();
+            KeepLowerBodyRotationStable(legsLockBlend);
         }
-        if (lockFeetLocalPosition && keepLegsLocked)
+        if (lockFeetLocalPosition && legsLockBlend > 0.0001f)
         {
-            KeepFeetLocalPositionStable();
+            KeepFeetLocalPositionStable(legsLockBlend);
         }
-        if (forceFeetLockDuringWindup)
+
+        float targetToesBlend = (forceFeetLockDuringWindup && lockToesOnGround) ? 1f : 0f;
+        float toesBlendSeconds = targetToesBlend > toesLockBlend
+            ? Mathf.Max(0.01f, toesLockAcquireSeconds)
+            : Mathf.Max(0.01f, toesLockReleaseSeconds);
+        toesLockBlend = Mathf.MoveTowards(toesLockBlend, targetToesBlend, Time.deltaTime / toesBlendSeconds);
+
+        if (toesLockBlend > 0.0001f)
         {
-            KeepToesLocalRotationStable();
+            KeepToesLocalRotationStable(toesLockBlend);
+            if (lockToesOnGround)
+            {
+                KeepToesWorldPositionStable(toesLockBlend);
+            }
         }
         ApplyIdleBreathing();
     }
@@ -1384,6 +1419,8 @@ public class SlapMechanics : MonoBehaviour
         if (rightFootBone != null) rightFootStartLocalPos = rightFootBone.localPosition;
         if (leftToesBone != null) leftToesStartLocalPos = leftToesBone.localPosition;
         if (rightToesBone != null) rightToesStartLocalPos = rightToesBone.localPosition;
+        if (leftToesBone != null) leftToesStartWorldPos = leftToesBone.position;
+        if (rightToesBone != null) rightToesStartWorldPos = rightToesBone.position;
         if (leftFootBone != null) leftFootStartLocalRot = leftFootBone.localRotation;
         if (rightFootBone != null) rightFootStartLocalRot = rightFootBone.localRotation;
         if (leftToesBone != null) leftToesStartLocalRot = leftToesBone.localRotation;
@@ -1407,23 +1444,24 @@ public class SlapMechanics : MonoBehaviour
         if (leftToesBone != null)
         {
             leftToesStartLocalPos = leftToesBone.localPosition;
+            leftToesStartWorldPos = leftToesBone.position;
             leftToesStartLocalRot = leftToesBone.localRotation;
         }
         if (rightToesBone != null)
         {
             rightToesStartLocalPos = rightToesBone.localPosition;
+            rightToesStartWorldPos = rightToesBone.position;
             rightToesStartLocalRot = rightToesBone.localRotation;
         }
         feetStartLocalPosPinned = true;
     }
 
-    private void KeepFeetLocalPositionStable()
+    private void KeepFeetLocalPositionStable(float blend01 = 1f)
     {
         PinFeetStartLocalPosition();
-        if (leftFootBone != null) leftFootBone.localPosition = leftFootStartLocalPos;
-        if (rightFootBone != null) rightFootBone.localPosition = rightFootStartLocalPos;
-        if (leftToesBone != null) leftToesBone.localPosition = leftToesStartLocalPos;
-        if (rightToesBone != null) rightToesBone.localPosition = rightToesStartLocalPos;
+        float w = Mathf.Clamp01(blend01);
+        if (leftFootBone != null) leftFootBone.localPosition = Vector3.Lerp(leftFootBone.localPosition, leftFootStartLocalPos, w);
+        if (rightFootBone != null) rightFootBone.localPosition = Vector3.Lerp(rightFootBone.localPosition, rightFootStartLocalPos, w);
     }
 
     private void KeepFeetLocalRotationStable()
@@ -1435,11 +1473,20 @@ public class SlapMechanics : MonoBehaviour
         if (rightToesBone != null) rightToesBone.localRotation = rightToesStartLocalRot;
     }
 
-    private void KeepToesLocalRotationStable()
+    private void KeepToesLocalRotationStable(float blend01 = 1f)
     {
         PinFeetStartLocalPosition();
-        if (leftToesBone != null) leftToesBone.localRotation = leftToesStartLocalRot;
-        if (rightToesBone != null) rightToesBone.localRotation = rightToesStartLocalRot;
+        float w = Mathf.Clamp01(blend01);
+        if (leftToesBone != null) leftToesBone.localRotation = Quaternion.Slerp(leftToesBone.localRotation, leftToesStartLocalRot, w);
+        if (rightToesBone != null) rightToesBone.localRotation = Quaternion.Slerp(rightToesBone.localRotation, rightToesStartLocalRot, w);
+    }
+
+    private void KeepToesWorldPositionStable(float blend01 = 1f)
+    {
+        PinFeetStartLocalPosition();
+        float w = Mathf.Clamp01(blend01);
+        if (leftToesBone != null) leftToesBone.position = Vector3.Lerp(leftToesBone.position, leftToesStartWorldPos, w);
+        if (rightToesBone != null) rightToesBone.position = Vector3.Lerp(rightToesBone.position, rightToesStartWorldPos, w);
     }
 
     private void CacheAttackHandBonesIfNeeded()
@@ -1498,18 +1545,54 @@ public class SlapMechanics : MonoBehaviour
         return AttackHand.Left;
     }
 
-    private void KeepLowerBodyRotationStable()
+    private void KeepLowerBodyRotationStable(float blend01 = 1f)
     {
         CacheLowerBodyBonesIfNeeded();
         if (lowerBodyBones == null || lowerBodyStartLocalRotations == null) return;
 
         int count = Mathf.Min(lowerBodyBones.Length, lowerBodyStartLocalRotations.Length);
+        float blend = Mathf.Clamp01(blend01);
+        float smoothT = 1f - Mathf.Exp(-Mathf.Max(0.01f, kneeLockSmoothing) * Time.deltaTime);
         for (int i = 0; i < count; i++)
         {
             var b = lowerBodyBones[i];
             if (b == null) continue;
-            b.localRotation = lowerBodyStartLocalRotations[i];
+            Quaternion target = lowerBodyStartLocalRotations[i];
+            if (hardLockShins && IsShinBoneForLock(b))
+            {
+                b.localRotation = Quaternion.Slerp(b.localRotation, target, blend);
+                continue;
+            }
+            if (smoothKneeLock && IsKneeOrLegBoneForLock(b))
+            {
+                b.localRotation = Quaternion.Slerp(b.localRotation, target, smoothT * blend);
+            }
+            else
+            {
+                b.localRotation = Quaternion.Slerp(b.localRotation, target, blend);
+            }
         }
+    }
+
+    private static bool IsKneeOrLegBoneForLock(Transform bone)
+    {
+        if (bone == null) return false;
+        string n = bone.name.ToLowerInvariant();
+        return n.Contains("upperleg") ||
+               n.Contains("lowerleg") ||
+               n.Contains("thigh") ||
+               n.Contains("calf") ||
+               n.Contains("shin") ||
+               n.Contains("knee");
+    }
+
+    private static bool IsShinBoneForLock(Transform bone)
+    {
+        if (bone == null) return false;
+        string n = bone.name.ToLowerInvariant();
+        return n.Contains("lowerleg") ||
+               n.Contains("calf") ||
+               n.Contains("shin");
     }
 
     private void PinStartPosition()
@@ -1660,17 +1743,21 @@ public class SlapMechanics : MonoBehaviour
     {
         if (animator == null) return false;
         if (!IsAnimatorInIdleState()) return false;
-        bool touchPrimingOnly =
-            swipeActive &&
-            !windupTriggered &&
-            pendingDir == Dir.None &&
-            attackPhase == AttackPhase.Idle;
+        bool touchPrimingOnly = IsTouchPrimingOnly();
         if (swipeActive && !touchPrimingOnly) return false;
         if (windupTriggered || inputLockedAfterSlap) return false;
         if (pendingDir != Dir.None) return false;
         if (IsSlapAnimating()) return false;
         if (role == Role.Defender && IsDefenderBlocking()) return false;
         return true;
+    }
+
+    private bool IsTouchPrimingOnly()
+    {
+        return swipeActive &&
+               !windupTriggered &&
+               pendingDir == Dir.None &&
+               attackPhase == AttackPhase.Idle;
     }
 
     private bool IsAnimatorInIdleState()
@@ -3227,6 +3314,7 @@ public class SlapMechanics : MonoBehaviour
         {
             return true;
         }
+        if (IsTouchPrimingOnly()) return true;
         if (IsAnimatorInCombatMotion()) return false;
         if (attackPhase != AttackPhase.Idle) return false;
         if (swipeActive || windupTriggered || inputLockedAfterSlap) return false;
