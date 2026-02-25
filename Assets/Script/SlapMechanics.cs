@@ -41,6 +41,13 @@ public class SlapMechanics : MonoBehaviour
         DownRight
     }
 
+    public enum VisualHand
+    {
+        None,
+        Left,
+        Right
+    }
+
     private enum AttackPhase
     {
         Idle,
@@ -99,6 +106,7 @@ public class SlapMechanics : MonoBehaviour
     [SerializeField] private float swipeDeadzonePx = 20f;
     [SerializeField] private float slapWindowSeconds = 1.5f;
     [SerializeField] private float swipeDistanceCm = 5f;
+    [SerializeField] private float blockSwipeDistanceCm = 2f;
     [SerializeField] private float slapReverseDistanceFactor = 3f;
     [SerializeField] private bool alwaysTriggerSlapOnReverseSwipe = true;
     [SerializeField] private float minReverseSwipeDistanceCm = 0.2f;
@@ -218,6 +226,7 @@ public class SlapMechanics : MonoBehaviour
     private Dir pendingDir = Dir.None;
     private float pendingTime;
     private float requiredPixels;
+    private float requiredBlockPixels;
     private float maxProgress;
     private float windupCarryOffset;
     private float handVelocity;
@@ -921,7 +930,7 @@ public class SlapMechanics : MonoBehaviour
             }
             if (defenderBlockChosenThisSwipe && !string.IsNullOrEmpty(currentBlockState) && lastBlockDir != Dir.None)
             {
-                float progress = GetProgressAlongDir(pos, swipeStart, lastBlockDir);
+                float progress = GetProgressAlongDir(pos, swipeStart, lastBlockDir, true);
                 if (progress > defenderBlockHoldNormalized)
                 {
                     defenderBlockHoldNormalized = progress;
@@ -1819,6 +1828,8 @@ public class SlapMechanics : MonoBehaviour
         if (dpi <= 0f) dpi = fallbackDpi;
         requiredPixels = swipeDistanceCm * (dpi / 2.54f);
         if (requiredPixels <= 0f) requiredPixels = 1f;
+        requiredBlockPixels = blockSwipeDistanceCm * (dpi / 2.54f);
+        if (requiredBlockPixels <= 0f) requiredBlockPixels = 1f;
     }
 
     private float GetDeadzonePx()
@@ -1828,13 +1839,14 @@ public class SlapMechanics : MonoBehaviour
         return Mathf.Max(swipeDeadzonePx, 2f, dpi * 0.02f);
     }
 
-    private float GetProgressAlongDir(Vector2 pos, Vector2 start, Dir dir)
+    private float GetProgressAlongDir(Vector2 pos, Vector2 start, Dir dir, bool useBlockDistance = false)
     {
         Vector2 d = pos - start;
         Vector2 axis = GetAxisForDir(dir);
         if (axis == Vector2.zero) return 0f;
         float dist = Vector2.Dot(d, axis);
-        return Mathf.Clamp01(dist / requiredPixels);
+        float denominator = useBlockDistance ? requiredBlockPixels : requiredPixels;
+        return Mathf.Clamp01(dist / Mathf.Max(1f, denominator));
     }
 
     private float GetProjectedAlongDir(Vector2 pos, Vector2 start, Dir dir)
@@ -2391,6 +2403,92 @@ public class SlapMechanics : MonoBehaviour
     public SlapDirection GetPendingDirection()
     {
         return ToPublicDir(pendingDir);
+    }
+
+    public bool IsControlledHandMoving()
+    {
+        if (role == Role.Attacker)
+        {
+            return swipeActive ||
+                   windupTriggered ||
+                   pendingDir != Dir.None ||
+                   attackPhase == AttackPhase.WindupActive ||
+                   attackPhase == AttackPhase.SlapActive ||
+                   attackPhase == AttackPhase.ReturningAfterWindup ||
+                   IsCurrentStateSlap();
+        }
+
+        if (role == Role.Defender)
+        {
+            return IsDefenderBlocking() || IsDefenderBlockReleasing();
+        }
+
+        return false;
+    }
+
+    public VisualHand GetControlledVisualHand()
+    {
+        if (!IsControlledHandMoving()) return VisualHand.None;
+
+        if (role == Role.Attacker)
+        {
+            AttackHand hand = activeAttackHand;
+            if (hand == AttackHand.Both)
+            {
+                if (swipeAttackHand == AttackHand.Left || swipeAttackHand == AttackHand.Right)
+                {
+                    hand = swipeAttackHand;
+                }
+                else if (TryResolveHorizontalAttackHand(out var horizontalHand) && horizontalHand != AttackHand.Both)
+                {
+                    hand = horizontalHand;
+                }
+                else
+                {
+                    hand = GetPreferredAttackHand();
+                }
+            }
+
+            return hand == AttackHand.Right ? VisualHand.Right : VisualHand.Left;
+        }
+
+        if (role == Role.Defender)
+        {
+            return lastBlockDir switch
+            {
+                Dir.Left => VisualHand.Left,
+                Dir.UpLeft => VisualHand.Left,
+                Dir.DownLeft => VisualHand.Left,
+                Dir.Right => VisualHand.Right,
+                Dir.UpRight => VisualHand.Right,
+                Dir.DownRight => VisualHand.Right,
+                _ => GetPreferredAttackHand() == AttackHand.Right ? VisualHand.Right : VisualHand.Left
+            };
+        }
+
+        return VisualHand.None;
+    }
+
+    public float GetControlledVisualProgress01()
+    {
+        if (!IsControlledHandMoving()) return 0f;
+
+        if (role == Role.Attacker)
+        {
+            // During slap phase keep full visibility: hand must not blink
+            // when windup parameter is reset around transitions.
+            if (IsCurrentStateSlap()) return 1f;
+
+            float p = Mathf.Clamp01(GetDebugWindup01());
+            return p;
+        }
+
+        if (role == Role.Defender)
+        {
+            return Mathf.Clamp01(GetDefenderBlockHold01());
+        }
+
+        return 0f;
     }
 
     public bool IsDefenderBlocking()
