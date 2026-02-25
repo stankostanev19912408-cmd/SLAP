@@ -152,7 +152,6 @@ public class SlapCombatManager : MonoBehaviour
 
     private void Awake()
     {
-        EnsureSceneProxyRig();
         EnsureHandsCopyHierarchyOnly();
 
         if (!Application.isPlaying)
@@ -228,7 +227,6 @@ public class SlapCombatManager : MonoBehaviour
 
     private void Update()
     {
-        EnsureSceneProxyRig();
         if (pendingEnsureHandsHierarchy)
         {
             pendingEnsureHandsHierarchy = false;
@@ -1091,12 +1089,6 @@ public class SlapCombatManager : MonoBehaviour
         return t;
     }
 
-    private void EnsureSceneProxyRig()
-    {
-        if (GetComponent<SceneHandProxyRig>() != null) return;
-        gameObject.AddComponent<SceneHandProxyRig>();
-    }
-
     private void AutoBindEditHandsRootsIfMissing()
     {
     }
@@ -1472,7 +1464,7 @@ public class SlapCombatManager : MonoBehaviour
         var defender = GetCurrentDefender();
         var attackerStats = GetStats(attacker);
         var defenderStats = GetStats(defender);
-        if (attackerStats != null && attacker != null && attacker.GetDebugWindup01() > 0.01f)
+        if (attackerStats != null && attacker != null && attacker.IsAttackerWindupHolding())
         {
             float rate = attackerStats.MaxStamina / Mathf.Max(0.01f, staminaDrainSeconds);
             attackerStats.SpendStamina(rate * Time.deltaTime);

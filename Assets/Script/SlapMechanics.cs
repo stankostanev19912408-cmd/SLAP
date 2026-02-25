@@ -209,6 +209,7 @@ public class SlapMechanics : MonoBehaviour
     private float pendingTime;
     private float requiredPixels;
     private float maxProgress;
+    private float windupCarryOffset;
     private float handVelocity;
     private string currentWindupState;
     private string currentSlapState;
@@ -421,6 +422,7 @@ public class SlapMechanics : MonoBehaviour
             {
                 pendingDir = Dir.None;
                 maxProgress = 0f;
+                windupCarryOffset = 0f;
                 if (!inputLockedAfterSlap)
                 {
                     attackPhase = AttackPhase.Idle;
@@ -453,7 +455,8 @@ public class SlapMechanics : MonoBehaviour
                         swipeStart = touch.position;
                         lastSwipePos = swipeStart;
                         lastSwipeSampleTime = Time.time;
-                        maxProgress = animator != null ? Mathf.Clamp01(animator.GetFloat(handMoveParam)) : 0f;
+                        windupCarryOffset = animator != null ? Mathf.Clamp01(animator.GetFloat(handMoveParam)) : 0f;
+                        maxProgress = windupCarryOffset;
                         maxSwipeSpeedCmPerSec = 0f;
                         reverseSwipePeakCmPerSec = 0f;
                         reverseIntentHeldSeconds = 0f;
@@ -494,7 +497,8 @@ public class SlapMechanics : MonoBehaviour
                     swipeStart = Input.mousePosition;
                     lastSwipePos = swipeStart;
                     lastSwipeSampleTime = Time.time;
-                    maxProgress = animator != null ? Mathf.Clamp01(animator.GetFloat(handMoveParam)) : 0f;
+                    windupCarryOffset = animator != null ? Mathf.Clamp01(animator.GetFloat(handMoveParam)) : 0f;
+                    maxProgress = windupCarryOffset;
                     maxSwipeSpeedCmPerSec = 0f;
                     reverseSwipePeakCmPerSec = 0f;
                     reverseIntentHeldSeconds = 0f;
@@ -521,15 +525,39 @@ public class SlapMechanics : MonoBehaviour
 
         if (!swipeActive || pendingDir == Dir.None)
         {
+            bool hasIdleStateForShortest =
+                !string.IsNullOrEmpty(idleStateName) &&
+                animator.HasState(0, Animator.StringToHash(idleStateName));
+            bool shortestReturnByCrossfade =
+                releaseReturnActive &&
+                returnToIdleByShortestRoute &&
+                !swipeActive &&
+                attackPhase == AttackPhase.ReturningAfterWindup &&
+                hasIdleStateForShortest;
+
             float v = animator.GetFloat(handMoveParam);
-            v = SmoothToZero(v);
-            animator.SetFloat(handMoveParam, v);
+            if (!shortestReturnByCrossfade)
+            {
+                v = SmoothToZero(v);
+                animator.SetFloat(handMoveParam, v);
+            }
+            else if (!animator.IsInTransition(0) && IsAnimatorInIdleState())
+            {
+                // End shortest-path return exactly when idle is reached.
+                releaseReturnActive = false;
+                pendingDir = Dir.None;
+                maxProgress = 0f;
+                windupCarryOffset = 0f;
+                windupStartTimeSet = false;
+                if (!inputLockedAfterSlap) attackPhase = AttackPhase.Idle;
+            }
 
             // End carry only after hand fully returned.
             if (!swipeActive && pendingDir != Dir.None && v <= 0.02f)
             {
                 pendingDir = Dir.None;
                 maxProgress = 0f;
+                windupCarryOffset = 0f;
                 if (!inputLockedAfterSlap)
                 {
                     attackPhase = AttackPhase.Idle;
@@ -552,7 +580,7 @@ public class SlapMechanics : MonoBehaviour
                 attackPhase = AttackPhase.Idle;
             }
 
-            if (releaseReturnActive && v <= 0.02f)
+            if (releaseReturnActive && !shortestReturnByCrossfade && v <= 0.02f)
             {
                 releaseReturnActive = false;
             }
@@ -809,17 +837,13 @@ public class SlapMechanics : MonoBehaviour
             return;
         }
 
-        // New touch can inherit pendingDir from previous returning hand.
-        // If player immediately swipes in another direction, retarget instantly
-        // so first swipe is not wasted on stale carry direction.
-        if (!windupTriggered && pendingDir != Dir.None && dir != pendingDir)
+        // Hard rule:
+        // if hand is still carrying windup direction, do not retarget to another direction.
+        if (role == Role.Attacker && !windupTriggered && pendingDir != Dir.None && dir != pendingDir)
         {
-            pendingDir = Dir.None;
-            maxProgress = 0f;
-            maxProjectedPx = 0f;
-            reverseSwipePeakCmPerSec = 0f;
-            swipeStart = lastSwipePos;
-            windupStartTimeSet = false;
+            lastSwipePos = pos;
+            lastSwipeSampleTime = now;
+            return;
         }
 
         if (role == Role.Defender)
@@ -832,6 +856,7 @@ public class SlapMechanics : MonoBehaviour
                     lastBlockDir = dir;
                     swipeStart = pos;
                     maxProgress = 0f;
+                    windupCarryOffset = 0f;
                     defenderBlockHoldNormalized = 0f;
                     defenderBlockChosenThisSwipe = true;
                     defenderBlockStartTime = Time.time;
@@ -851,6 +876,7 @@ public class SlapMechanics : MonoBehaviour
             windupTriggered = true;
             pendingDir = Dir.None;
             maxProgress = 0f;
+            windupCarryOffset = 0f;
             animator.SetFloat(handMoveParam, 0f);
             lastSwipePos = pos;
             lastSwipeSampleTime = now;
@@ -896,6 +922,7 @@ public class SlapMechanics : MonoBehaviour
                 slapPlayedThisSwipe = false;
                 pendingDir = Dir.None;
                 maxProgress = 0f;
+                windupCarryOffset = 0f;
                 maxProjectedPx = 0f;
                 reverseSwipePeakCmPerSec = 0f;
                 reverseIntentHeldSeconds = 0f;
@@ -944,6 +971,7 @@ public class SlapMechanics : MonoBehaviour
             windupStartTimeSet = false;
             windupTriggered = true;
             maxProgress = 0f;
+            windupCarryOffset = 0f;
             maxProjectedPx = 0f;
             reverseSwipePeakCmPerSec = 0f;
             reverseSwipeCurrentCmPerSec = 0f;
@@ -975,6 +1003,8 @@ public class SlapMechanics : MonoBehaviour
             pendingTime = Time.time;
             windupTriggered = true;
             attackPhase = AttackPhase.WindupActive;
+            windupCarryOffset = animator != null ? Mathf.Clamp01(animator.GetFloat(handMoveParam)) : 0f;
+            maxProgress = windupCarryOffset;
             maxProjectedPx = 0f;
             reverseSwipePeakCmPerSec = 0f;
             reverseIntentHeldSeconds = 0f;
@@ -988,7 +1018,9 @@ public class SlapMechanics : MonoBehaviour
             float projected = GetProjectedAlongDir(pos, swipeStart, pendingDir);
             if (projected > maxProjectedPx) maxProjectedPx = projected;
             float speedProgress = Mathf.Clamp01((lastSwipeSpeed - speedMinCmPerSec) / Mathf.Max(0.01f, speedMaxCmPerSec - speedMinCmPerSec));
-            float progress = Mathf.Clamp01(distProgress + speedProgress * Mathf.Clamp01(speedWeightInWindup));
+            float rawProgress = Mathf.Clamp01(distProgress + speedProgress * Mathf.Clamp01(speedWeightInWindup));
+            float carry = Mathf.Clamp01(windupCarryOffset);
+            float progress = carry + rawProgress * (1f - carry);
             if (progress > maxProgress)
             {
                 maxProgress = progress;
@@ -1035,7 +1067,8 @@ public class SlapMechanics : MonoBehaviour
             reverseIntentHeldSeconds = 0f;
             return;
         }
-        if (!slapPlayedThisSwipe && pendingDir != Dir.None)
+        bool canceledWindup = !slapPlayedThisSwipe && pendingDir != Dir.None;
+        if (canceledWindup)
         {
             attackPhase = AttackPhase.ReturningAfterWindup;
             releaseReturnActive = true;
@@ -1043,12 +1076,16 @@ public class SlapMechanics : MonoBehaviour
         }
         lastWindupReleaseTime = Time.time;
         suppressSlapUntilNextTouch = true;
-        pendingDir = Dir.None;
+        if (!canceledWindup)
+        {
+            pendingDir = Dir.None;
+        }
         windupTriggered = false;
         maxProjectedPx = 0f;
         reverseSwipePeakCmPerSec = 0f;
         reverseIntentHeldSeconds = 0f;
         maxProgress = 0f;
+        windupCarryOffset = 0f;
     }
 
     private void BeginShortestReturnToIdle()
@@ -1058,7 +1095,7 @@ public class SlapMechanics : MonoBehaviour
         if (string.IsNullOrEmpty(idleStateName)) return;
         int hash = Animator.StringToHash(idleStateName);
         if (!animator.HasState(0, hash)) return;
-        float fade = Mathf.Max(0.01f, releaseToIdleCrossfadeSeconds);
+        float fade = GetWindupReturnCrossfadeSeconds();
         animator.CrossFadeInFixedTime(hash, fade, 0, 0f, 0f);
         attackPhase = AttackPhase.ReturningAfterWindup;
     }
@@ -1084,7 +1121,7 @@ public class SlapMechanics : MonoBehaviour
         int idleHash = Animator.StringToHash(idleStateName);
         if (string.IsNullOrEmpty(idleStateName) || !animator.HasState(0, idleHash)) return;
 
-        float fade = Mathf.Max(0.01f, slapReturnCrossfadeSeconds);
+        float fade = Mathf.Max(0.01f, slapReturnCrossfadeSeconds) * 1.0416666f;
         animator.CrossFadeInFixedTime(idleHash, fade, 0, 0f, 0f);
         attackPhase = AttackPhase.ReturningAfterSlap;
         inputLockedAfterSlap = false;
@@ -1102,7 +1139,7 @@ public class SlapMechanics : MonoBehaviour
 
         if (!string.IsNullOrEmpty(idleStateName) && animator.HasState(0, Animator.StringToHash(idleStateName)))
         {
-            animator.CrossFadeInFixedTime(idleStateName, 0.06f, 0, 0f, 0f);
+            animator.CrossFadeInFixedTime(idleStateName, GetWindupReturnCrossfadeSeconds(), 0, 0f, 0f);
         }
         attackPhase = AttackPhase.ReturningAfterWindup;
     }
@@ -1115,10 +1152,16 @@ public class SlapMechanics : MonoBehaviour
 
         if (!string.IsNullOrEmpty(idleStateName) && animator.HasState(0, Animator.StringToHash(idleStateName)))
         {
-            animator.CrossFadeInFixedTime(idleStateName, 0.04f, 0, 0f, 0f);
+            animator.CrossFadeInFixedTime(idleStateName, GetWindupReturnCrossfadeSeconds(), 0, 0f, 0f);
         }
         inputLockedAfterSlap = false;
         attackPhase = AttackPhase.ReturningAfterWindup;
+    }
+
+    private float GetWindupReturnCrossfadeSeconds()
+    {
+        // Canceled windup should return directly to idle via the shortest path.
+        return Mathf.Max(0.01f, releaseToIdleCrossfadeSeconds) * 12.5f;
     }
 
     private Dir GetDirection(Vector2 delta)
@@ -2092,6 +2135,7 @@ public class SlapMechanics : MonoBehaviour
             slapPlayedThisSwipe = false;
             inputLockedAfterSlap = false;
             maxProgress = 0f;
+            windupCarryOffset = 0f;
             maxProjectedPx = 0f;
             reverseSwipePeakCmPerSec = 0f;
             windupStartTimeSet = false;
@@ -2248,6 +2292,16 @@ public class SlapMechanics : MonoBehaviour
     public bool IsDefenderBlockReleasing()
     {
         return role == Role.Defender && defenderBlockReleaseActive;
+    }
+
+    public bool IsAttackerWindupHolding()
+    {
+        return role == Role.Attacker &&
+               attackPhase == AttackPhase.WindupActive &&
+               swipeActive &&
+               windupTriggered &&
+               pendingDir != Dir.None &&
+               !inputLockedAfterSlap;
     }
 
     public void ConfigureAura(bool enable, bool owner)
@@ -2683,6 +2737,7 @@ public class SlapMechanics : MonoBehaviour
         windupTriggered = true;
         attackPhase = AttackPhase.WindupActive;
         maxProgress = 0f;
+        windupCarryOffset = 0f;
         maxProjectedPx = 0f;
         reverseSwipePeakCmPerSec = 0f;
         slapPlayedThisSwipe = false;
@@ -2752,6 +2807,7 @@ public class SlapMechanics : MonoBehaviour
         pendingDir = Dir.None;
         windupStartTimeSet = false;
         maxProgress = 0f;
+        windupCarryOffset = 0f;
         maxProjectedPx = 0f;
         reverseSwipePeakCmPerSec = 0f;
     }
@@ -2761,6 +2817,7 @@ public class SlapMechanics : MonoBehaviour
         pendingDir = Dir.None;
         windupTriggered = false;
         maxProgress = 0f;
+        windupCarryOffset = 0f;
         maxProjectedPx = 0f;
         reverseSwipePeakCmPerSec = 0f;
         windupStartTimeSet = false;
@@ -2782,6 +2839,7 @@ public class SlapMechanics : MonoBehaviour
         pendingDir = Dir.None;
         windupTriggered = false;
         maxProgress = 0f;
+        windupCarryOffset = 0f;
         maxProjectedPx = 0f;
         reverseSwipePeakCmPerSec = 0f;
         windupStartTimeSet = false;
