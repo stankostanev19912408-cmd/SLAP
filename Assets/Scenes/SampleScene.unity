@@ -2556,7 +2556,7 @@ MonoBehaviour:
   headForwardEulerOffset: {x: 0, y: 0, z: 0}
   rotateWithSourceHead: 1
   headPitchInfluence: 0.02777778
-  headYawInfluence: 0.01388889
+  headYawInfluence: 0.020833336
   headRollInfluence: 0.05555556
   lockRoll: 1
   rotationLerp: 20
@@ -2742,7 +2742,7 @@ MonoBehaviour:
   headForwardEulerOffset: {x: 0, y: 0, z: 0}
   rotateWithSourceHead: 1
   headPitchInfluence: 0.02777778
-  headYawInfluence: 0.01388889
+  headYawInfluence: 0.020833336
   headRollInfluence: 0.05555556
   lockRoll: 1
   rotationLerp: 20
@@ -3740,10 +3740,84 @@ MonoBehaviour:
   useCombatGlow: 1
   visibleOnlyForControllingCamera: 1
   movementRevealThreshold01: 0.001
-  handFadeSeconds: 0.2
+  handFadeSeconds: 0.1
   idleColor: {r: 1, g: 1, b: 1, a: 1}
-  idleOpacity: 0.1
+  pearlSecondaryColor: {r: 0.97, g: 0.99, b: 1, a: 1}
+  pearlShiftAmount: 0.12
+  pearlShiftSpeed: 1.8
+  pearlIdleGlowIntensity: 0.5
+  idleOpacity: 0.15
   activeColorOpacity: 0.4
+  shoulderOpacityMultiplier: 0.03
+  armOpacityMultiplier: 0.1
+  attackGlowColor: {r: 1, g: 0, b: 0, a: 1}
+  blockGlowColor: {r: 0.1, g: 0.45, b: 1, a: 1}
+  glowMinIntensity: 0
+  glowMaxIntensity: 4
+  glowBlendSpeed: 14
+--- !u!1 &2147001100
+GameObject:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  serializedVersion: 6
+  m_Component:
+  - component: {fileID: 2147001101}
+  - component: {fileID: 2147001102}
+  m_Layer: 0
+  m_Name: idle_hands_avatar_1
+  m_TagString: Untagged
+  m_Icon: {fileID: 0}
+  m_NavMeshLayer: 0
+  m_StaticEditorFlags: 0
+  m_IsActive: 1
+--- !u!4 &2147001101
+Transform:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 2147001100}
+  serializedVersion: 2
+  m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
+  m_LocalPosition: {x: 0, y: 0.24, z: 0.26999998}
+  m_LocalScale: {x: 0.72, y: 0.72, z: 0.72}
+  m_ConstrainProportionsScale: 0
+  m_Children: []
+  m_Father: {fileID: 0}
+  m_LocalEulerAnglesHint: {x: 0.04, y: 0, z: 0}
+--- !u!114 &2147001102
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 2147001100}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 7fcbf3f6d6f1c1e4ebf7e5c1a8b44a12, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: 
+  sourceRootName: idle (1)
+  worldOffset: {x: 0, y: 0.24, z: 0.78}
+  followSource: 1
+  avatarScaleMultiplier: 0.72
+  handWeightThreshold: 0.45
+  disableOriginalRenderers: 0
+  useCombatGlow: 1
+  visibleOnlyForControllingCamera: 1
+  movementRevealThreshold01: 0.001
+  handFadeSeconds: 0.1
+  idleColor: {r: 1, g: 1, b: 1, a: 1}
+  pearlSecondaryColor: {r: 0.97, g: 0.99, b: 1, a: 1}
+  pearlShiftAmount: 0.12
+  pearlShiftSpeed: 1.8
+  pearlIdleGlowIntensity: 0.5
+  idleOpacity: 0.15
+  activeColorOpacity: 0.4
+  shoulderOpacityMultiplier: 0.03
+  armOpacityMultiplier: 0.1
   attackGlowColor: {r: 1, g: 0, b: 0, a: 1}
   blockGlowColor: {r: 0.1, g: 0.45, b: 1, a: 1}
   glowMinIntensity: 0
@@ -3765,5 +3839,6 @@ SceneRoots:
   - {fileID: 2100000201}
   - {fileID: 2100000301}
   - {fileID: 2147001001}
+  - {fileID: 2147001101}
   - {fileID: 442545181}
   - {fileID: 1655820501}

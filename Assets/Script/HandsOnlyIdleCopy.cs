@@ -34,8 +34,14 @@ public class HandsOnlyIdleCopy : MonoBehaviour
     [SerializeField, Range(0f, 0.2f)] private float movementRevealThreshold01 = 0.001f;
     [SerializeField, Range(0.01f, 0.5f)] private float handFadeSeconds = 0.2f;
     [SerializeField] private Color idleColor = new Color(1f, 1f, 1f, 1f);
-    [SerializeField, Range(0.01f, 1f)] private float idleOpacity = 0.1f;
+    [SerializeField] private Color pearlSecondaryColor = new Color(0.97f, 0.99f, 1f, 1f);
+    [SerializeField, Range(0f, 1f)] private float pearlShiftAmount = 0.12f;
+    [SerializeField] private float pearlShiftSpeed = 1.8f;
+    [SerializeField] private float pearlIdleGlowIntensity = 0.5f;
+    [SerializeField, Range(0.01f, 1f)] private float idleOpacity = 0.15f;
     [SerializeField, Range(0.01f, 1f)] private float activeColorOpacity = 0.4f;
+    [SerializeField, Range(0f, 1f)] private float shoulderOpacityMultiplier = 0.03f;
+    [SerializeField, Range(0f, 1f)] private float armOpacityMultiplier = 0.1f;
     [SerializeField] private Color attackGlowColor = new Color(1f, 0f, 0f, 1f);
     [SerializeField] private Color blockGlowColor = new Color(0.1f, 0.45f, 1f, 1f);
     [SerializeField, Range(0f, 1f)] private float glowMinIntensity = 0f;
@@ -44,13 +50,21 @@ public class HandsOnlyIdleCopy : MonoBehaviour
 
     private const string PoseRigContainerName = "HandsPoseRig";
     private const string LeftHandMeshName = "LeftHandOnlyMesh";
+    private const string LeftArmMeshName = "LeftHandArmOnlyMesh";
+    private const string LeftShoulderMeshName = "LeftHandShoulderOnlyMesh";
     private const string RightHandMeshName = "RightHandOnlyMesh";
+    private const string RightArmMeshName = "RightHandArmOnlyMesh";
+    private const string RightShoulderMeshName = "RightHandShoulderOnlyMesh";
     private const string PoseBoneSuffix = "__HandsPose";
 
     private Transform sourceRoot;
     private SkinnedMeshRenderer sourceRenderer;
     private SkinnedMeshRenderer leftRenderer;
+    private SkinnedMeshRenderer leftArmRenderer;
+    private SkinnedMeshRenderer leftShoulderRenderer;
     private SkinnedMeshRenderer rightRenderer;
+    private SkinnedMeshRenderer rightArmRenderer;
+    private SkinnedMeshRenderer rightShoulderRenderer;
     private Transform poseRigRoot;
     private Transform[] sourceBones;
     private Transform[] poseBones;
@@ -66,6 +80,13 @@ public class HandsOnlyIdleCopy : MonoBehaviour
     private Dictionary<Transform, Transform> sourceToPoseBone;
     private List<Transform> poseSyncSource;
     private List<Transform> poseSyncTarget;
+
+    private enum HandZone
+    {
+        Core,
+        Arm,
+        Shoulder
+    }
 
     private void OnEnable()
     {
@@ -118,7 +139,11 @@ public class HandsOnlyIdleCopy : MonoBehaviour
         {
             ClearGeneratedChildren();
             leftRenderer = null;
+            leftArmRenderer = null;
+            leftShoulderRenderer = null;
             rightRenderer = null;
+            rightArmRenderer = null;
+            rightShoulderRenderer = null;
             poseRigRoot = null;
             sourceBones = null;
             poseBones = null;
@@ -241,7 +266,11 @@ public class HandsOnlyIdleCopy : MonoBehaviour
         if (!src.sharedMesh.isReadable) return;
 
         var leftBones = new HashSet<int>();
+        var leftShoulderBones = new HashSet<int>();
+        var leftArmBones = new HashSet<int>();
         var rightBones = new HashSet<int>();
+        var rightShoulderBones = new HashSet<int>();
+        var rightArmBones = new HashSet<int>();
 
         for (int i = 0; i < src.bones.Length; i++)
         {
@@ -249,8 +278,18 @@ public class HandsOnlyIdleCopy : MonoBehaviour
             if (b == null) continue;
             string n = b.name.ToLowerInvariant();
             if (!IsHandBoneName(n)) continue;
-            if (BoneNameIsLeft(n)) leftBones.Add(i);
-            else if (BoneNameIsRight(n)) rightBones.Add(i);
+            if (BoneNameIsLeft(n))
+            {
+                leftBones.Add(i);
+                if (IsShoulderBoneName(n)) leftShoulderBones.Add(i);
+                else if (IsUpperArmBoneName(n)) leftArmBones.Add(i);
+            }
+            else if (BoneNameIsRight(n))
+            {
+                rightBones.Add(i);
+                if (IsShoulderBoneName(n)) rightShoulderBones.Add(i);
+                else if (IsUpperArmBoneName(n)) rightArmBones.Add(i);
+            }
         }
 
         if (leftBones.Count == 0 && rightBones.Count == 0) return;
@@ -258,8 +297,12 @@ public class HandsOnlyIdleCopy : MonoBehaviour
         BuildPoseRig(src);
         if (poseBones == null || poseBones.Length != src.bones.Length) return;
 
-        Mesh leftMesh = leftBones.Count > 0 ? BuildHandOnlyMesh(src, leftBones, "_LeftHandOnly") : null;
-        Mesh rightMesh = rightBones.Count > 0 ? BuildHandOnlyMesh(src, rightBones, "_RightHandOnly") : null;
+        Mesh leftMesh = leftBones.Count > 0
+            ? BuildHandOnlyMesh(src, leftBones, leftShoulderBones, leftArmBones, "_LeftHandOnly")
+            : null;
+        Mesh rightMesh = rightBones.Count > 0
+            ? BuildHandOnlyMesh(src, rightBones, rightShoulderBones, rightArmBones, "_RightHandOnly")
+            : null;
 
         if (leftMesh != null)
         {
@@ -388,35 +431,57 @@ public class HandsOnlyIdleCopy : MonoBehaviour
         }
     }
 
-    private Mesh BuildHandOnlyMesh(SkinnedMeshRenderer source, HashSet<int> allowedBones, string suffix)
+    private Mesh BuildHandZoneMesh(
+        SkinnedMeshRenderer source,
+        HashSet<int> allowedBones,
+        HashSet<int> shoulderBones,
+        HashSet<int> armBones,
+        HandZone zone,
+        string suffix)
     {
         Mesh src = source.sharedMesh;
         if (src == null || src.vertexCount <= 0) return null;
         if (src.boneWeights == null || src.boneWeights.Length != src.vertexCount) return null;
 
-        var keepVertex = new bool[src.vertexCount];
         var boneWeights = src.boneWeights;
-        for (int i = 0; i < boneWeights.Length; i++)
+        int vertexCount = src.vertexCount;
+        var keepVertex = new bool[vertexCount];
+        var shoulderWeights = new float[vertexCount];
+        var armWeights = new float[vertexCount];
+        var coreWeights = new float[vertexCount];
+
+        for (int i = 0; i < vertexCount; i++)
         {
             BoneWeight bw = boneWeights[i];
-            float handWeight = 0f;
-            if (allowedBones.Contains(bw.boneIndex0)) handWeight += bw.weight0;
-            if (allowedBones.Contains(bw.boneIndex1)) handWeight += bw.weight1;
-            if (allowedBones.Contains(bw.boneIndex2)) handWeight += bw.weight2;
-            if (allowedBones.Contains(bw.boneIndex3)) handWeight += bw.weight3;
-            keepVertex[i] = handWeight >= handWeightThreshold;
+            float handWeight = GetBoneSetWeight(bw, allowedBones);
+            if (handWeight < handWeightThreshold) continue;
+
+            float shoulderWeight = GetBoneSetWeight(bw, shoulderBones);
+            float armWeight = GetBoneSetWeight(bw, armBones);
+            float coreWeight = Mathf.Max(0f, handWeight - shoulderWeight - armWeight);
+
+            keepVertex[i] = true;
+            shoulderWeights[i] = shoulderWeight;
+            armWeights[i] = armWeight;
+            coreWeights[i] = coreWeight;
         }
 
         int[] tris = src.triangles;
         if (tris == null || tris.Length < 3) return null;
         var used = new HashSet<int>();
-        var keptTri = new List<int>(tris.Length);
+        var keptTri = new List<int>(tris.Length / 3);
         for (int i = 0; i + 2 < tris.Length; i += 3)
         {
             int a = tris[i];
             int b = tris[i + 1];
             int c = tris[i + 2];
             if (!keepVertex[a] || !keepVertex[b] || !keepVertex[c]) continue;
+
+            float shoulder = (shoulderWeights[a] + shoulderWeights[b] + shoulderWeights[c]) / 3f;
+            float arm = (armWeights[a] + armWeights[b] + armWeights[c]) / 3f;
+            float core = (coreWeights[a] + coreWeights[b] + coreWeights[c]) / 3f;
+            if (DetermineTriangleZone(shoulder, arm, core) != zone) continue;
+
             keptTri.Add(a);
             keptTri.Add(b);
             keptTri.Add(c);
@@ -424,7 +489,7 @@ public class HandsOnlyIdleCopy : MonoBehaviour
             used.Add(b);
             used.Add(c);
         }
-        if (keptTri.Count < 30) return null;
+        if (keptTri.Count < 12) return null;
 
         var map = new Dictionary<int, int>(used.Count);
         var srcVerts = src.vertices;
@@ -461,6 +526,134 @@ public class HandsOnlyIdleCopy : MonoBehaviour
         if (newNormals != null) handMesh.SetNormals(newNormals);
         if (newTangents != null) handMesh.SetTangents(newTangents);
         if (newUv != null) handMesh.SetUVs(0, newUv);
+        handMesh.boneWeights = newBw.ToArray();
+        handMesh.bindposes = src.bindposes;
+        handMesh.SetTriangles(remapTris, 0, true);
+        if (newNormals == null) handMesh.RecalculateNormals();
+        handMesh.RecalculateBounds();
+        return handMesh;
+    }
+
+    private static HandZone DetermineTriangleZone(float shoulderWeight, float armWeight, float coreWeight)
+    {
+        if (shoulderWeight >= armWeight && shoulderWeight >= coreWeight && shoulderWeight > 0.0001f)
+        {
+            return HandZone.Shoulder;
+        }
+
+        if (armWeight >= shoulderWeight && armWeight >= coreWeight && armWeight > 0.0001f)
+        {
+            return HandZone.Arm;
+        }
+
+        return HandZone.Core;
+    }
+
+    private static float GetBoneSetWeight(BoneWeight bw, HashSet<int> indices)
+    {
+        if (indices == null || indices.Count == 0) return 0f;
+        float w = 0f;
+        if (indices.Contains(bw.boneIndex0)) w += bw.weight0;
+        if (indices.Contains(bw.boneIndex1)) w += bw.weight1;
+        if (indices.Contains(bw.boneIndex2)) w += bw.weight2;
+        if (indices.Contains(bw.boneIndex3)) w += bw.weight3;
+        return w;
+    }
+
+    private Mesh BuildHandOnlyMesh(
+        SkinnedMeshRenderer source,
+        HashSet<int> allowedBones,
+        HashSet<int> shoulderBones,
+        HashSet<int> armBones,
+        string suffix)
+    {
+        Mesh src = source.sharedMesh;
+        if (src == null || src.vertexCount <= 0) return null;
+        if (src.boneWeights == null || src.boneWeights.Length != src.vertexCount) return null;
+
+        var keepVertex = new bool[src.vertexCount];
+        var vertexAlpha = new float[src.vertexCount];
+        var boneWeights = src.boneWeights;
+        for (int i = 0; i < boneWeights.Length; i++)
+        {
+            BoneWeight bw = boneWeights[i];
+            float handWeight = GetBoneSetWeight(bw, allowedBones);
+            if (handWeight < handWeightThreshold) continue;
+
+            float shoulderWeight = GetBoneSetWeight(bw, shoulderBones);
+            float armWeight = GetBoneSetWeight(bw, armBones);
+            float safeHandWeight = Mathf.Max(0.0001f, handWeight);
+            float shoulder01 = Mathf.Clamp01(shoulderWeight / safeHandWeight);
+            float arm01 = Mathf.Clamp01(armWeight / safeHandWeight);
+            float rest01 = Mathf.Clamp01(1f - shoulder01 - arm01);
+
+            float alphaMul =
+                rest01 +
+                shoulder01 * Mathf.Clamp01(shoulderOpacityMultiplier) +
+                arm01 * Mathf.Clamp01(armOpacityMultiplier);
+
+            keepVertex[i] = true;
+            vertexAlpha[i] = Mathf.Clamp01(alphaMul);
+        }
+
+        int[] tris = src.triangles;
+        if (tris == null || tris.Length < 3) return null;
+        var used = new HashSet<int>();
+        var keptTri = new List<int>(tris.Length);
+        for (int i = 0; i + 2 < tris.Length; i += 3)
+        {
+            int a = tris[i];
+            int b = tris[i + 1];
+            int c = tris[i + 2];
+            if (!keepVertex[a] || !keepVertex[b] || !keepVertex[c]) continue;
+            keptTri.Add(a);
+            keptTri.Add(b);
+            keptTri.Add(c);
+            used.Add(a);
+            used.Add(b);
+            used.Add(c);
+        }
+        if (keptTri.Count < 30) return null;
+
+        var map = new Dictionary<int, int>(used.Count);
+        var srcVerts = src.vertices;
+        var srcNormals = src.normals;
+        var srcTangents = src.tangents;
+        var srcUv = src.uv;
+
+        var newVerts = new List<Vector3>(used.Count);
+        var newNormals = (srcNormals != null && srcNormals.Length == srcVerts.Length) ? new List<Vector3>(used.Count) : null;
+        var newTangents = (srcTangents != null && srcTangents.Length == srcVerts.Length) ? new List<Vector4>(used.Count) : null;
+        var newUv = (srcUv != null && srcUv.Length == srcVerts.Length) ? new List<Vector2>(used.Count) : null;
+        var newColors = new List<Color32>(used.Count);
+        var newBw = new List<BoneWeight>(used.Count);
+
+        foreach (int oldIndex in used)
+        {
+            int newIndex = newVerts.Count;
+            map[oldIndex] = newIndex;
+            newVerts.Add(srcVerts[oldIndex]);
+            if (newNormals != null) newNormals.Add(srcNormals[oldIndex]);
+            if (newTangents != null) newTangents.Add(srcTangents[oldIndex]);
+            if (newUv != null) newUv.Add(srcUv[oldIndex]);
+            byte alphaByte = (byte)Mathf.RoundToInt(Mathf.Clamp01(vertexAlpha[oldIndex]) * 255f);
+            newColors.Add(new Color32(255, 255, 255, alphaByte));
+            newBw.Add(boneWeights[oldIndex]);
+        }
+
+        var remapTris = new int[keptTri.Count];
+        for (int i = 0; i < keptTri.Count; i++)
+        {
+            remapTris[i] = map[keptTri[i]];
+        }
+
+        var handMesh = new Mesh();
+        handMesh.name = source.sharedMesh.name + suffix;
+        handMesh.SetVertices(newVerts);
+        if (newNormals != null) handMesh.SetNormals(newNormals);
+        if (newTangents != null) handMesh.SetTangents(newTangents);
+        if (newUv != null) handMesh.SetUVs(0, newUv);
+        handMesh.SetColors(newColors);
         handMesh.boneWeights = newBw.ToArray();
         handMesh.bindposes = src.bindposes;
         handMesh.SetTriangles(remapTris, 0, true);
@@ -511,7 +704,8 @@ public class HandsOnlyIdleCopy : MonoBehaviour
             CleanupAvatarMaterial();
         }
 
-        Shader shader = Shader.Find("Universal Render Pipeline/Unlit");
+        Shader shader = Shader.Find("Unlit/HandsAvatarGradientUnlit");
+        if (shader == null) shader = Shader.Find("Universal Render Pipeline/Unlit");
         if (shader == null) shader = Shader.Find("Standard");
         if (shader == null) shader = Shader.Find("Sprites/Default");
         if (shader == null) shader = Shader.Find("Unlit/Transparent");
@@ -537,13 +731,34 @@ public class HandsOnlyIdleCopy : MonoBehaviour
             var leftT = transform.Find(LeftHandMeshName);
             if (leftT != null) leftRenderer = leftT.GetComponent<SkinnedMeshRenderer>();
         }
+        if (leftArmRenderer == null)
+        {
+            var leftArmT = transform.Find(LeftArmMeshName);
+            if (leftArmT != null) leftArmRenderer = leftArmT.GetComponent<SkinnedMeshRenderer>();
+        }
+        if (leftShoulderRenderer == null)
+        {
+            var leftShoulderT = transform.Find(LeftShoulderMeshName);
+            if (leftShoulderT != null) leftShoulderRenderer = leftShoulderT.GetComponent<SkinnedMeshRenderer>();
+        }
         if (rightRenderer == null)
         {
             var rightT = transform.Find(RightHandMeshName);
             if (rightT != null) rightRenderer = rightT.GetComponent<SkinnedMeshRenderer>();
         }
+        if (rightArmRenderer == null)
+        {
+            var rightArmT = transform.Find(RightArmMeshName);
+            if (rightArmT != null) rightArmRenderer = rightArmT.GetComponent<SkinnedMeshRenderer>();
+        }
+        if (rightShoulderRenderer == null)
+        {
+            var rightShoulderT = transform.Find(RightShoulderMeshName);
+            if (rightShoulderT != null) rightShoulderRenderer = rightShoulderT.GetComponent<SkinnedMeshRenderer>();
+        }
 
-        if (leftRenderer == null && rightRenderer == null) return;
+        if (leftRenderer == null && leftArmRenderer == null && leftShoulderRenderer == null &&
+            rightRenderer == null && rightArmRenderer == null && rightShoulderRenderer == null) return;
         if (sourceRenderer == null) return;
 
         var mat = GetOrCreateAvatarMaterial(sourceRenderer);
@@ -556,9 +771,25 @@ public class HandsOnlyIdleCopy : MonoBehaviour
         {
             leftRenderer.sharedMaterials = new[] { mat };
         }
+        if (leftArmRenderer != null && leftArmRenderer.sharedMaterial != mat)
+        {
+            leftArmRenderer.sharedMaterials = new[] { mat };
+        }
+        if (leftShoulderRenderer != null && leftShoulderRenderer.sharedMaterial != mat)
+        {
+            leftShoulderRenderer.sharedMaterials = new[] { mat };
+        }
         if (rightRenderer != null && rightRenderer.sharedMaterial != mat)
         {
             rightRenderer.sharedMaterials = new[] { mat };
+        }
+        if (rightArmRenderer != null && rightArmRenderer.sharedMaterial != mat)
+        {
+            rightArmRenderer.sharedMaterials = new[] { mat };
+        }
+        if (rightShoulderRenderer != null && rightShoulderRenderer.sharedMaterial != mat)
+        {
+            rightShoulderRenderer.sharedMaterials = new[] { mat };
         }
     }
 
@@ -620,9 +851,24 @@ public class HandsOnlyIdleCopy : MonoBehaviour
 
         bool leftVisibleNow = leftTarget || leftHandFade01 > 0.001f;
         bool rightVisibleNow = rightTarget || rightHandFade01 > 0.001f;
-        if (leftRenderer != null) leftRenderer.enabled = leftVisibleNow;
-        if (rightRenderer != null) rightRenderer.enabled = rightVisibleNow;
+        SetSideRenderersEnabled(true, leftVisibleNow);
+        SetSideRenderersEnabled(false, rightVisibleNow);
         renderersVisible = leftVisibleNow || rightVisibleNow;
+    }
+
+    private void SetSideRenderersEnabled(bool leftSide, bool enabled)
+    {
+        if (leftSide)
+        {
+            if (leftRenderer != null) leftRenderer.enabled = enabled;
+            if (leftArmRenderer != null) leftArmRenderer.enabled = enabled;
+            if (leftShoulderRenderer != null) leftShoulderRenderer.enabled = enabled;
+            return;
+        }
+
+        if (rightRenderer != null) rightRenderer.enabled = enabled;
+        if (rightArmRenderer != null) rightArmRenderer.enabled = enabled;
+        if (rightShoulderRenderer != null) rightShoulderRenderer.enabled = enabled;
     }
 
     private bool ShouldShowForCurrentViewer()
@@ -667,7 +913,8 @@ public class HandsOnlyIdleCopy : MonoBehaviour
 
     private void UpdateAvatarVisual()
     {
-        if (leftRenderer == null && rightRenderer == null) return;
+        if (leftRenderer == null && leftArmRenderer == null && leftShoulderRenderer == null &&
+            rightRenderer == null && rightArmRenderer == null && rightShoulderRenderer == null) return;
         if (!renderersVisible) return;
         if (avatarMaterial == null)
         {
@@ -679,8 +926,16 @@ public class HandsOnlyIdleCopy : MonoBehaviour
         {
             glowProgressSmoothed = 0f;
             glowColorSmoothed = Color.black;
-            ApplyHandRendererVisual(leftRenderer, leftPropertyBlock, GetIdleFogColor(), Color.black, leftHandFade01);
-            ApplyHandRendererVisual(rightRenderer, rightPropertyBlock, GetIdleFogColor(), Color.black, rightHandFade01);
+            Color pearl = GetPearlTint();
+            Color idleFog = GetFogColor(idleOpacity);
+            Color idleBaseColor = new Color(pearl.r, pearl.g, pearl.b, idleFog.a);
+            Color idlePearlEmission = pearl * Mathf.Max(0f, pearlIdleGlowIntensity);
+            ApplyHandRendererVisual(leftRenderer, leftPropertyBlock, idleBaseColor, idlePearlEmission, leftHandFade01);
+            ApplyHandRendererVisual(leftArmRenderer, leftPropertyBlock, idleBaseColor, idlePearlEmission, leftHandFade01 * armOpacityMultiplier);
+            ApplyHandRendererVisual(leftShoulderRenderer, leftPropertyBlock, idleBaseColor, idlePearlEmission, leftHandFade01 * shoulderOpacityMultiplier);
+            ApplyHandRendererVisual(rightRenderer, rightPropertyBlock, idleBaseColor, idlePearlEmission, rightHandFade01);
+            ApplyHandRendererVisual(rightArmRenderer, rightPropertyBlock, idleBaseColor, idlePearlEmission, rightHandFade01 * armOpacityMultiplier);
+            ApplyHandRendererVisual(rightShoulderRenderer, rightPropertyBlock, idleBaseColor, idlePearlEmission, rightHandFade01 * shoulderOpacityMultiplier);
             return;
         }
 
@@ -698,16 +953,23 @@ public class HandsOnlyIdleCopy : MonoBehaviour
 
         float alpha = Mathf.Lerp(Mathf.Clamp01(idleOpacity), Mathf.Clamp01(activeColorOpacity), glowProgressSmoothed);
         Color fog = GetFogColor(alpha);
-        Color tinted = Color.Lerp(Color.white, glowColorSmoothed, glowProgressSmoothed);
+        Color pearlTint = GetPearlTint();
+        Color tinted = Color.Lerp(pearlTint, glowColorSmoothed, glowProgressSmoothed);
         Color baseColor = new Color(tinted.r, tinted.g, tinted.b, fog.a);
 
         float intensity = glowProgressSmoothed <= 0.0001f
             ? 0f
             : Mathf.Lerp(Mathf.Max(0f, glowMinIntensity), Mathf.Max(0f, glowMaxIntensity), glowProgressSmoothed);
-        Color emissionColor = targetColor * intensity * Mathf.Clamp01(alpha * 3f);
+        Color pearlEmission = pearlTint * Mathf.Max(0f, pearlIdleGlowIntensity);
+        Color combatEmission = targetColor * intensity * Mathf.Clamp01(alpha * 3f);
+        Color emissionColor = pearlEmission + combatEmission;
 
         ApplyHandRendererVisual(leftRenderer, leftPropertyBlock, baseColor, emissionColor, leftHandFade01);
+        ApplyHandRendererVisual(leftArmRenderer, leftPropertyBlock, baseColor, emissionColor, leftHandFade01 * armOpacityMultiplier);
+        ApplyHandRendererVisual(leftShoulderRenderer, leftPropertyBlock, baseColor, emissionColor, leftHandFade01 * shoulderOpacityMultiplier);
         ApplyHandRendererVisual(rightRenderer, rightPropertyBlock, baseColor, emissionColor, rightHandFade01);
+        ApplyHandRendererVisual(rightArmRenderer, rightPropertyBlock, baseColor, emissionColor, rightHandFade01 * armOpacityMultiplier);
+        ApplyHandRendererVisual(rightShoulderRenderer, rightPropertyBlock, baseColor, emissionColor, rightHandFade01 * shoulderOpacityMultiplier);
     }
 
     private void GetGlowTarget(out Color targetColor, out float targetProgress)
@@ -772,6 +1034,23 @@ public class HandsOnlyIdleCopy : MonoBehaviour
         return c;
     }
 
+    private Color GetPearlTint()
+    {
+        Color pearlBase;
+        if (!Application.isPlaying)
+        {
+            pearlBase = Color.Lerp(idleColor, pearlSecondaryColor, Mathf.Clamp01(pearlShiftAmount * 0.5f));
+        }
+        else
+        {
+            float t = (Mathf.Sin(Time.time * Mathf.Max(0f, pearlShiftSpeed)) * 0.5f + 0.5f) * Mathf.Clamp01(pearlShiftAmount);
+            pearlBase = Color.Lerp(idleColor, pearlSecondaryColor, t);
+        }
+
+        // Keep tint bright to avoid visually turning gray at low alpha.
+        return Color.Lerp(pearlBase, Color.white, 0.6f);
+    }
+
     private static void ApplyColor(Material mat, Color color)
     {
         if (mat == null) return;
@@ -816,6 +1095,20 @@ public class HandsOnlyIdleCopy : MonoBehaviour
         if (Application.isPlaying) Destroy(avatarMaterial);
         else DestroyImmediate(avatarMaterial);
         avatarMaterial = null;
+    }
+
+    private static bool IsShoulderBoneName(string lowerName)
+    {
+        return lowerName.Contains("shoulder") || lowerName.Contains("clavicle");
+    }
+
+    private static bool IsUpperArmBoneName(string lowerName)
+    {
+        bool arm = lowerName.Contains("upperarm") || lowerName.Contains("arm");
+        bool notForearm = !lowerName.Contains("forearm");
+        bool notShoulder = !IsShoulderBoneName(lowerName);
+        bool notHand = !lowerName.Contains("hand");
+        return arm && notForearm && notShoulder && notHand;
     }
 
     private static bool IsHandBoneName(string lowerName)
