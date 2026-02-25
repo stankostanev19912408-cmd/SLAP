@@ -180,6 +180,7 @@ public class SlapMechanics : MonoBehaviour
     [SerializeField] private float upSlapPoseBlendDuration = 0.28f;
     [SerializeField] private float upSlapPoseReleasePower = 4f;
     [SerializeField] private float upSlapStartNormalizedTime = 0f;
+    [SerializeField] private float sideUppercutSlapStartMaxNormalizedTime = 0.35f;
     [SerializeField] private bool useDirectHandTimeForCardinalSlaps = true;
     [SerializeField] private float cardinalSlapStartOffset = 0f;
     [SerializeField] private float diagonalSlapStartOffset = 0f;
@@ -242,6 +243,7 @@ public class SlapMechanics : MonoBehaviour
     private float reverseSwipePeakCmPerSec;
     private float reverseSwipeCurrentCmPerSec;
     private float reverseSwipeSmoothedCmPerSec;
+    private float reverseAccumulatedPx;
     private float reverseIntentHeldSeconds;
     private float lastWindupReleaseTime;
     private bool suppressSlapUntilNextTouch;
@@ -502,6 +504,7 @@ public class SlapMechanics : MonoBehaviour
                         maxProgress = windupCarryOffset;
                         maxSwipeSpeedCmPerSec = 0f;
                         reverseSwipePeakCmPerSec = 0f;
+                        reverseAccumulatedPx = 0f;
                         reverseIntentHeldSeconds = 0f;
                         defenderBlockChosenThisSwipe = false;
                     }
@@ -544,6 +547,7 @@ public class SlapMechanics : MonoBehaviour
                     maxProgress = windupCarryOffset;
                     maxSwipeSpeedCmPerSec = 0f;
                     reverseSwipePeakCmPerSec = 0f;
+                    reverseAccumulatedPx = 0f;
                     reverseIntentHeldSeconds = 0f;
                     defenderBlockChosenThisSwipe = false;
                 }
@@ -852,25 +856,16 @@ public class SlapMechanics : MonoBehaviour
         float speedPxPerSec = frameDelta.magnitude / dt;
         lastSwipeSpeed = PixelsToCm(speedPxPerSec);
         if (lastSwipeSpeed > maxSwipeSpeedCmPerSec) maxSwipeSpeedCmPerSec = lastSwipeSpeed;
+        UpdateReverseSwipeTracking(frameDelta, dt);
 
-        if (pendingDir != Dir.None)
+        // Allow finish-slaps during carry return even if next swipe direction differs from pending windup.
+        // This check must run before the hard retarget lock below.
+        if (role == Role.Attacker && !windupTriggered && pendingDir != Dir.None)
         {
-            Vector2 axis = GetAxisForDir(pendingDir);
-            if (axis != Vector2.zero)
+            if (TryTriggerSlapFromReverse(pos, frameDelta, dt, now))
             {
-                float reversePx = Mathf.Max(0f, -Vector2.Dot(frameDelta, axis));
-                float reversePxPerSec = reversePx / dt;
-                float reverseCmPerSec = PixelsToCm(reversePxPerSec);
-                reverseSwipeCurrentCmPerSec = reverseCmPerSec;
-                float smoothRate = 14f * Time.deltaTime;
-                reverseSwipeSmoothedCmPerSec = Mathf.Lerp(reverseSwipeSmoothedCmPerSec, reverseCmPerSec, Mathf.Clamp01(smoothRate));
-                if (reverseCmPerSec > reverseSwipePeakCmPerSec) reverseSwipePeakCmPerSec = reverseCmPerSec;
+                return;
             }
-        }
-        else
-        {
-            reverseSwipeCurrentCmPerSec = 0f;
-            reverseSwipeSmoothedCmPerSec = Mathf.MoveTowards(reverseSwipeSmoothedCmPerSec, 0f, 20f * Time.deltaTime);
         }
 
         Vector2 deltaFromStart = pos - swipeStart;
@@ -949,102 +944,8 @@ public class SlapMechanics : MonoBehaviour
             return;
         }
 
-        bool reverseIntent;
-        if (alwaysTriggerSlapOnReverseSwipe)
+        if (TryTriggerSlapFromReverse(pos, frameDelta, dt, now))
         {
-            reverseIntent = pendingDir != Dir.None && IsSlapReverseReached(pos, frameDelta);
-        }
-        else
-        {
-            reverseIntent =
-                pendingDir != Dir.None &&
-                IsSlapReverseReached(pos, frameDelta) &&
-                IsReverseSwipeIntentional();
-        }
-        if (reverseIntent)
-        {
-            reverseIntentHeldSeconds += dt;
-        }
-        else
-        {
-            reverseIntentHeldSeconds = 0f;
-        }
-
-        float requiredReverseHold = alwaysTriggerSlapOnReverseSwipe ? 0f : Mathf.Max(0f, minReverseHoldSecondsForSlap);
-        if (pendingDir != Dir.None && reverseIntent && reverseIntentHeldSeconds >= requiredReverseHold)
-        {
-            if (suppressSlapUntilNextTouch)
-            {
-                lastSwipePos = pos;
-                lastSwipeSampleTime = now;
-                return;
-            }
-            float currentHand = animator.GetFloat(handMoveParam);
-            float effectiveWindup = Mathf.Max(currentHand, maxProgress);
-            if (!alwaysTriggerSlapOnReverseSwipe && effectiveWindup < minWindupForSlap)
-            {
-                // Not enough windup: do not consume this swipe.
-                // Reset slap attempt data and let current movement become a fresh windup.
-                slapPlayedThisSwipe = false;
-                pendingDir = Dir.None;
-                maxProgress = 0f;
-                windupCarryOffset = 0f;
-                maxProjectedPx = 0f;
-                reverseSwipePeakCmPerSec = 0f;
-                reverseIntentHeldSeconds = 0f;
-                windupTriggered = false;
-                lastSwipePos = pos;
-                lastSwipeSampleTime = now;
-                windupStartTimeSet = false;
-                return;
-            }
-            else if (!string.IsNullOrEmpty(currentSlapState))
-            {
-                Dir attackDir = pendingDir;
-                float slapSwipeSpeed = reverseSwipeSmoothedCmPerSec > 0.01f
-                    ? reverseSwipeSmoothedCmPerSec
-                    : Mathf.Max(0f, reverseSwipeCurrentCmPerSec);
-                if (slapSwipeSpeed <= 0.01f)
-                {
-                    slapSwipeSpeed = Mathf.Max(0f, lastSwipeSpeed);
-                }
-                SetSlapSpeed(slapSwipeSpeed);
-                float slapStart = GetSlapStartNormalizedTime(currentSlapState, currentHand);
-                bool isCardinalSlap = IsCardinalSlapState(currentSlapState);
-                bool isUpSlap = currentSlapState == slapUpSlap;
-                BeginSlapPoseBlend(isCardinalSlap, isUpSlap);
-
-                float fadeSeconds = isUpSlap
-                    ? upSlapCrossfadeSeconds
-                    : (isCardinalSlap ? cardinalSlapCrossfadeSeconds : slapStateCrossfadeSeconds);
-
-                if (fadeSeconds <= 0f)
-                {
-                    animator.Play(currentSlapState, 0, slapStart);
-                }
-                else
-                {
-                    animator.CrossFadeInFixedTime(currentSlapState, fadeSeconds, 0, slapStart, 0f);
-                }
-                slapPlayedThisSwipe = true;
-                attackPhase = AttackPhase.SlapActive;
-                inputLockedAfterSlap = true;
-                swipeActive = false;
-                lastSlapDir = attackDir;
-                RaiseSlapFired();
-            }
-            pendingDir = Dir.None;
-            windupStartTimeSet = false;
-            windupTriggered = true;
-            maxProgress = 0f;
-            windupCarryOffset = 0f;
-            maxProjectedPx = 0f;
-            reverseSwipePeakCmPerSec = 0f;
-            reverseSwipeCurrentCmPerSec = 0f;
-            reverseSwipeSmoothedCmPerSec = 0f;
-            reverseIntentHeldSeconds = 0f;
-            lastSwipePos = pos;
-            lastSwipeSampleTime = now;
             return;
         }
 
@@ -1073,6 +974,7 @@ public class SlapMechanics : MonoBehaviour
             maxProgress = windupCarryOffset;
             maxProjectedPx = 0f;
             reverseSwipePeakCmPerSec = 0f;
+            reverseAccumulatedPx = 0f;
             reverseIntentHeldSeconds = 0f;
             windupStartTime = Time.time;
             windupStartTimeSet = true;
@@ -1102,6 +1004,135 @@ public class SlapMechanics : MonoBehaviour
         lastSwipeSampleTime = now;
     }
 
+    private void UpdateReverseSwipeTracking(Vector2 frameDelta, float dt)
+    {
+        if (pendingDir != Dir.None)
+        {
+            Vector2 axis = GetAxisForDir(pendingDir);
+            if (axis != Vector2.zero)
+            {
+                float reversePx = Mathf.Max(0f, -Vector2.Dot(frameDelta, axis));
+                reverseAccumulatedPx += reversePx;
+                float reversePxPerSec = reversePx / Mathf.Max(1f / 120f, dt);
+                float reverseCmPerSec = PixelsToCm(reversePxPerSec);
+                reverseSwipeCurrentCmPerSec = reverseCmPerSec;
+                float smoothRate = Mathf.Clamp01(14f * Mathf.Max(1f / 120f, dt));
+                reverseSwipeSmoothedCmPerSec = Mathf.Lerp(reverseSwipeSmoothedCmPerSec, reverseCmPerSec, smoothRate);
+                if (reverseCmPerSec > reverseSwipePeakCmPerSec) reverseSwipePeakCmPerSec = reverseCmPerSec;
+                return;
+            }
+        }
+
+        reverseSwipeCurrentCmPerSec = 0f;
+        reverseSwipeSmoothedCmPerSec = Mathf.MoveTowards(reverseSwipeSmoothedCmPerSec, 0f, 20f * Mathf.Max(1f / 120f, dt));
+        reverseAccumulatedPx = 0f;
+    }
+
+    private bool TryTriggerSlapFromReverse(Vector2 pos, Vector2 frameDelta, float dt, float now)
+    {
+        bool reverseIntent = pendingDir != Dir.None && IsSlapReverseReached(pos, frameDelta);
+        if (!alwaysTriggerSlapOnReverseSwipe)
+        {
+            reverseIntent = reverseIntent && IsReverseSwipeIntentional();
+        }
+
+        if (reverseIntent)
+        {
+            reverseIntentHeldSeconds += Mathf.Max(1f / 120f, dt);
+        }
+        else
+        {
+            reverseIntentHeldSeconds = 0f;
+        }
+
+        float requiredReverseHold = alwaysTriggerSlapOnReverseSwipe ? 0f : Mathf.Max(0f, minReverseHoldSecondsForSlap);
+        if (!(pendingDir != Dir.None && reverseIntent && reverseIntentHeldSeconds >= requiredReverseHold))
+        {
+            return false;
+        }
+
+        if (suppressSlapUntilNextTouch)
+        {
+            lastSwipePos = pos;
+            lastSwipeSampleTime = now;
+            return true;
+        }
+
+        float currentHand = animator.GetFloat(handMoveParam);
+        float effectiveWindup = Mathf.Max(currentHand, maxProgress);
+        if (effectiveWindup < minWindupForSlap)
+        {
+            // Not enough windup: do not consume this swipe.
+            // Reset slap attempt data and let current movement become a fresh windup.
+            slapPlayedThisSwipe = false;
+            pendingDir = Dir.None;
+            maxProgress = 0f;
+            windupCarryOffset = 0f;
+            maxProjectedPx = 0f;
+            reverseSwipePeakCmPerSec = 0f;
+            reverseSwipeCurrentCmPerSec = 0f;
+            reverseSwipeSmoothedCmPerSec = 0f;
+            reverseAccumulatedPx = 0f;
+            reverseIntentHeldSeconds = 0f;
+            windupTriggered = false;
+            lastSwipePos = pos;
+            lastSwipeSampleTime = now;
+            windupStartTimeSet = false;
+            return true;
+        }
+
+        if (!string.IsNullOrEmpty(currentSlapState))
+        {
+            Dir attackDir = pendingDir;
+            float slapSwipeSpeed = reverseSwipeSmoothedCmPerSec > 0.01f
+                ? reverseSwipeSmoothedCmPerSec
+                : Mathf.Max(0f, reverseSwipeCurrentCmPerSec);
+            if (slapSwipeSpeed <= 0.01f)
+            {
+                slapSwipeSpeed = Mathf.Max(0f, lastSwipeSpeed);
+            }
+            SetSlapSpeed(slapSwipeSpeed);
+            float slapStart = GetFinishSlapStartNormalizedTime(currentSlapState, currentHand);
+            bool isCardinalSlap = IsCardinalSlapState(currentSlapState);
+            bool isUpSlap = currentSlapState == slapUpSlap;
+            BeginSlapPoseBlend(isCardinalSlap, isUpSlap);
+
+            float fadeSeconds = isUpSlap
+                ? upSlapCrossfadeSeconds
+                : (isCardinalSlap ? cardinalSlapCrossfadeSeconds : slapStateCrossfadeSeconds);
+
+            if (fadeSeconds <= 0f)
+            {
+                animator.Play(currentSlapState, 0, slapStart);
+            }
+            else
+            {
+                animator.CrossFadeInFixedTime(currentSlapState, fadeSeconds, 0, slapStart, 0f);
+            }
+            slapPlayedThisSwipe = true;
+            attackPhase = AttackPhase.SlapActive;
+            inputLockedAfterSlap = true;
+            swipeActive = false;
+            lastSlapDir = attackDir;
+            RaiseSlapFired();
+        }
+
+        pendingDir = Dir.None;
+        windupStartTimeSet = false;
+        windupTriggered = true;
+        maxProgress = 0f;
+        windupCarryOffset = 0f;
+        maxProjectedPx = 0f;
+        reverseSwipePeakCmPerSec = 0f;
+        reverseSwipeCurrentCmPerSec = 0f;
+        reverseSwipeSmoothedCmPerSec = 0f;
+        reverseAccumulatedPx = 0f;
+        reverseIntentHeldSeconds = 0f;
+        lastSwipePos = pos;
+        lastSwipeSampleTime = now;
+        return true;
+    }
+
     private bool IsReverseSwipeIntentional()
     {
         // Prevent accidental slap on tiny touch jitter near finger release.
@@ -1124,15 +1155,27 @@ public class SlapMechanics : MonoBehaviour
             return;
         }
 
-        // Releasing finger during windup never triggers slap.
-        // It should only start smooth return from current hand position.
+        float now = Time.time;
+        float dt = Mathf.Max(1f / 120f, now - lastSwipeSampleTime);
+        Vector2 frameDelta = pos - lastSwipePos;
+        float speedPxPerSec = frameDelta.magnitude / dt;
+        lastSwipeSpeed = PixelsToCm(speedPxPerSec);
+        if (lastSwipeSpeed > maxSwipeSpeedCmPerSec) maxSwipeSpeedCmPerSec = lastSwipeSpeed;
+        UpdateReverseSwipeTracking(frameDelta, dt);
 
         if (!windupTriggered)
         {
             windupStartTimeSet = false;
+            reverseAccumulatedPx = 0f;
             reverseIntentHeldSeconds = 0f;
             return;
         }
+
+        if (TryTriggerSlapFromReverse(pos, frameDelta, dt, now))
+        {
+            return;
+        }
+
         bool canceledWindup = !slapPlayedThisSwipe && pendingDir != Dir.None;
         if (canceledWindup)
         {
@@ -1140,7 +1183,7 @@ public class SlapMechanics : MonoBehaviour
             releaseReturnActive = true;
             BeginShortestReturnToIdle();
         }
-        lastWindupReleaseTime = Time.time;
+        lastWindupReleaseTime = now;
         suppressSlapUntilNextTouch = true;
         if (!canceledWindup)
         {
@@ -1149,6 +1192,9 @@ public class SlapMechanics : MonoBehaviour
         windupTriggered = false;
         maxProjectedPx = 0f;
         reverseSwipePeakCmPerSec = 0f;
+        reverseSwipeCurrentCmPerSec = 0f;
+        reverseSwipeSmoothedCmPerSec = 0f;
+        reverseAccumulatedPx = 0f;
         reverseIntentHeldSeconds = 0f;
         maxProgress = 0f;
         windupCarryOffset = 0f;
@@ -1879,20 +1925,18 @@ public class SlapMechanics : MonoBehaviour
         if (axis == Vector2.zero) return false;
 
         float reverseThresholdPx = requiredPixels / Mathf.Max(1f, slapReverseDistanceFactor);
-        if (alwaysTriggerSlapOnReverseSwipe)
-        {
-            float dpi = Screen.dpi;
-            if (dpi <= 0f) dpi = fallbackDpi;
-            float minPx = Mathf.Max(1f, Mathf.Max(0.01f, minReverseSwipeDistanceCm) * (dpi / 2.54f));
-            reverseThresholdPx = minPx;
-        }
+        float dpi = Screen.dpi;
+        if (dpi <= 0f) dpi = fallbackDpi;
+        float minReversePx = Mathf.Max(1f, Mathf.Max(0.01f, minReverseSwipeDistanceCm) * (dpi / 2.54f));
+        reverseThresholdPx = Mathf.Max(reverseThresholdPx, minReversePx);
         float currentProjected = Vector2.Dot(pos - swipeStart, axis);
         float reverseDistance = maxProjectedPx - currentProjected;
         float localMoveAlongWindup = Vector2.Dot(frameDelta, axis);
         bool movingBack = localMoveAlongWindup < 0f;
 
         bool reachedByProjection = movingBack && reverseDistance >= reverseThresholdPx;
-        return reachedByProjection;
+        bool reachedByAccumulated = reverseAccumulatedPx >= reverseThresholdPx;
+        return reachedByProjection || reachedByAccumulated;
     }
 
     private float SmoothToZero(float value)
@@ -2259,6 +2303,10 @@ public class SlapMechanics : MonoBehaviour
             windupCarryOffset = 0f;
             maxProjectedPx = 0f;
             reverseSwipePeakCmPerSec = 0f;
+            reverseSwipeCurrentCmPerSec = 0f;
+            reverseSwipeSmoothedCmPerSec = 0f;
+            reverseAccumulatedPx = 0f;
+            reverseIntentHeldSeconds = 0f;
             windupStartTimeSet = false;
             attackPhase = AttackPhase.Idle;
             BlendToIdlePose(0.12f);
@@ -2271,6 +2319,11 @@ public class SlapMechanics : MonoBehaviour
             windupTriggered = false;
             swipeActive = false;
             slapPlayedThisSwipe = false;
+            reverseSwipePeakCmPerSec = 0f;
+            reverseSwipeCurrentCmPerSec = 0f;
+            reverseSwipeSmoothedCmPerSec = 0f;
+            reverseAccumulatedPx = 0f;
+            reverseIntentHeldSeconds = 0f;
             // Do not force idle blend here: it creates a visible one-frame calm-pose dip
             // before defender block is applied.
         }
@@ -2947,6 +3000,10 @@ public class SlapMechanics : MonoBehaviour
         windupCarryOffset = 0f;
         maxProjectedPx = 0f;
         reverseSwipePeakCmPerSec = 0f;
+        reverseSwipeCurrentCmPerSec = 0f;
+        reverseSwipeSmoothedCmPerSec = 0f;
+        reverseAccumulatedPx = 0f;
+        reverseIntentHeldSeconds = 0f;
         slapPlayedThisSwipe = false;
         inputLockedAfterSlap = false;
         swipeActive = true;
@@ -3017,6 +3074,10 @@ public class SlapMechanics : MonoBehaviour
         windupCarryOffset = 0f;
         maxProjectedPx = 0f;
         reverseSwipePeakCmPerSec = 0f;
+        reverseSwipeCurrentCmPerSec = 0f;
+        reverseSwipeSmoothedCmPerSec = 0f;
+        reverseAccumulatedPx = 0f;
+        reverseIntentHeldSeconds = 0f;
     }
 
     public void AI_CancelWindup()
@@ -3027,6 +3088,10 @@ public class SlapMechanics : MonoBehaviour
         windupCarryOffset = 0f;
         maxProjectedPx = 0f;
         reverseSwipePeakCmPerSec = 0f;
+        reverseSwipeCurrentCmPerSec = 0f;
+        reverseSwipeSmoothedCmPerSec = 0f;
+        reverseAccumulatedPx = 0f;
+        reverseIntentHeldSeconds = 0f;
         windupStartTimeSet = false;
         swipeActive = false;
         if (animator != null && !string.IsNullOrEmpty(handMoveParam))
@@ -3049,6 +3114,10 @@ public class SlapMechanics : MonoBehaviour
         windupCarryOffset = 0f;
         maxProjectedPx = 0f;
         reverseSwipePeakCmPerSec = 0f;
+        reverseSwipeCurrentCmPerSec = 0f;
+        reverseSwipeSmoothedCmPerSec = 0f;
+        reverseAccumulatedPx = 0f;
+        reverseIntentHeldSeconds = 0f;
         windupStartTimeSet = false;
         swipeActive = false;
         // Do not force hand param to zero; let smoothing handle it.
@@ -3580,13 +3649,16 @@ public class SlapMechanics : MonoBehaviour
                                 slapStateName == slapErcutSlap;
         if (isSideOrUppercut)
         {
+            float sideUppercutMaxStart = Mathf.Clamp01(sideUppercutSlapStartMaxNormalizedTime);
             if (useDirectHandTimeForCardinalSlaps)
             {
                 // Slap clip starts from wound-up pose. Invert hand progress so small windup
                 // starts later in clip and does not travel full arc.
-                return Mathf.Clamp01((1f - h) + cardinalSlapStartOffset);
+                float start = (1f - h) + cardinalSlapStartOffset;
+                return Mathf.Clamp(start, 0f, sideUppercutMaxStart);
             }
-            return Mathf.Clamp01((1f - h) + diagonalSlapStartOffset);
+            float fallbackStart = (1f - h) + diagonalSlapStartOffset;
+            return Mathf.Clamp(fallbackStart, 0f, sideUppercutMaxStart);
         }
 
         bool isCardinal = slapStateName == slapLeftSlap ||
@@ -3597,6 +3669,25 @@ public class SlapMechanics : MonoBehaviour
         if (isCardinal && useDirectHandTimeForCardinalSlaps)
         {
             return Mathf.Clamp01((1f - h) + cardinalSlapStartOffset);
+        }
+
+        return Mathf.Clamp01((1f - h) + diagonalSlapStartOffset);
+    }
+
+    private float GetFinishSlapStartNormalizedTime(string slapStateName, float hand01)
+    {
+        float h = Mathf.Clamp01(hand01);
+        bool isCardinal = slapStateName == slapLeftSlap ||
+                          slapStateName == slapRightSlap ||
+                          slapStateName == slapUpSlap ||
+                          slapStateName == slapErcutSlap;
+
+        if (isCardinal)
+        {
+            float offset = useDirectHandTimeForCardinalSlaps
+                ? cardinalSlapStartOffset
+                : diagonalSlapStartOffset;
+            return Mathf.Clamp01((1f - h) + offset);
         }
 
         return Mathf.Clamp01((1f - h) + diagonalSlapStartOffset);
