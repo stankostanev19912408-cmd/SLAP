@@ -179,6 +179,8 @@ public class SlapMechanics : MonoBehaviour
     [Header("Visual")]
     [SerializeField] private bool handsOnlyVisual = false;
     [SerializeField] private bool allowGeneratedHandOnlyMeshes = false;
+    [SerializeField] private bool forceCharacterCastShadows = true;
+    [SerializeField] private bool forceCharacterReceiveShadows = true;
     [SerializeField] private SlapDirection preferredCombatHand = SlapDirection.Left;
     [SerializeField] private bool forceDirectionHandForHorizontal = true;
     [SerializeField] private bool horizontalSwipeUsesOppositeHand = false;
@@ -365,6 +367,7 @@ public class SlapMechanics : MonoBehaviour
     {
         EnsureAnimator();
         EnsurePositiveScaleX();
+        ApplyCharacterShadowSettings();
         PinStartPosition();
         PinStartY();
         PinStartRotation();
@@ -389,6 +392,25 @@ public class SlapMechanics : MonoBehaviour
         ApplyHandsOnlyVisualIfNeeded();
         RemoveShoulderCapsIfPresent();
         ReleaseDefenderBlockHold();
+    }
+
+    private void ApplyCharacterShadowSettings()
+    {
+        if (!forceCharacterCastShadows && !forceCharacterReceiveShadows) return;
+        var renderers = GetComponentsInChildren<Renderer>(true);
+        for (int i = 0; i < renderers.Length; i++)
+        {
+            var r = renderers[i];
+            if (r == null) continue;
+            if (forceCharacterCastShadows)
+            {
+                r.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.On;
+            }
+            if (forceCharacterReceiveShadows)
+            {
+                r.receiveShadows = true;
+            }
+        }
     }
 
     private void Start()
