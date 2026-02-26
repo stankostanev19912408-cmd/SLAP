@@ -105,7 +105,7 @@ public class SlapMechanics : MonoBehaviour
     [Header("Timing")]
     [SerializeField] private float swipeDeadzonePx = 20f;
     [SerializeField] private float slapWindowSeconds = 1.5f;
-    [SerializeField] private float swipeDistanceCm = 5f;
+    [SerializeField] private float swipeDistanceCm = 3.5f;
     [SerializeField] private float blockSwipeDistanceCm = 2f;
     [SerializeField] private float slapReverseDistanceFactor = 3f;
     [SerializeField] private bool alwaysTriggerSlapOnReverseSwipe = true;
@@ -121,10 +121,10 @@ public class SlapMechanics : MonoBehaviour
     [SerializeField] private float slapReturnCrossfadeSeconds = 0.24f;
     [SerializeField] private float slapReturnStartNormalizedTime = 0.98f;
     [SerializeField] private float fallbackDpi = 160f;
-    [SerializeField] private float slapSpeedMax = 10.5f;
-    [SerializeField] private float speedMinCmPerSec = 2f;
-    [SerializeField] private float speedMaxCmPerSec = 360f;
-    [SerializeField] private float swipeSpeedResponseMultiplier = 2.2f;
+    [SerializeField] private float slapSpeedMax = 7.35f;
+    [SerializeField] private float speedMinCmPerSec = 2.4f;
+    [SerializeField] private float speedMaxCmPerSec = 432f;
+    [SerializeField] private float swipeSpeedResponseMultiplier = 1.76f;
     [SerializeField] private float speedWeightInWindup = 0.2f;
     [SerializeField] private float minPlayableSlapSpeed = 0.05f;
     [SerializeField] private float diagonalSlapSpeedMultiplier = 1f;
@@ -248,6 +248,10 @@ public class SlapMechanics : MonoBehaviour
     private float lastWindupReleaseTime;
     private bool suppressSlapUntilNextTouch;
     private bool releaseReturnActive;
+    private bool windupReturnTrackingActive;
+    private float windupReturnStartTime;
+    private float windupReturnDuration;
+    private float windupReturnStart01;
     private bool slapReturnTriggered;
     private float startY;
     private bool startYPinned;
@@ -500,7 +504,7 @@ public class SlapMechanics : MonoBehaviour
                         swipeStart = touch.position;
                         lastSwipePos = swipeStart;
                         lastSwipeSampleTime = Time.time;
-                        windupCarryOffset = animator != null ? Mathf.Clamp01(animator.GetFloat(handMoveParam)) : 0f;
+                        windupCarryOffset = GetCurrentHandProgressForCombat();
                         maxProgress = windupCarryOffset;
                         maxSwipeSpeedCmPerSec = 0f;
                         reverseSwipePeakCmPerSec = 0f;
@@ -543,7 +547,7 @@ public class SlapMechanics : MonoBehaviour
                     swipeStart = Input.mousePosition;
                     lastSwipePos = swipeStart;
                     lastSwipeSampleTime = Time.time;
-                    windupCarryOffset = animator != null ? Mathf.Clamp01(animator.GetFloat(handMoveParam)) : 0f;
+                    windupCarryOffset = GetCurrentHandProgressForCombat();
                     maxProgress = windupCarryOffset;
                     maxSwipeSpeedCmPerSec = 0f;
                     reverseSwipePeakCmPerSec = 0f;
@@ -592,6 +596,11 @@ public class SlapMechanics : MonoBehaviour
             {
                 // End shortest-path return exactly when idle is reached.
                 releaseReturnActive = false;
+                if (!string.IsNullOrEmpty(handMoveParam))
+                {
+                    animator.SetFloat(handMoveParam, 0f);
+                }
+                ClearWindupReturnTracking();
                 pendingDir = Dir.None;
                 maxProgress = 0f;
                 windupCarryOffset = 0f;
@@ -603,6 +612,7 @@ public class SlapMechanics : MonoBehaviour
             if (!swipeActive && pendingDir != Dir.None && v <= 0.02f)
             {
                 pendingDir = Dir.None;
+                ClearWindupReturnTracking();
                 maxProgress = 0f;
                 windupCarryOffset = 0f;
                 if (!inputLockedAfterSlap)
@@ -624,12 +634,14 @@ public class SlapMechanics : MonoBehaviour
                 v <= 0.02f &&
                 attackPhase == AttackPhase.ReturningAfterWindup)
             {
+                ClearWindupReturnTracking();
                 attackPhase = AttackPhase.Idle;
             }
 
             if (releaseReturnActive && !shortestReturnByCrossfade && v <= 0.02f)
             {
                 releaseReturnActive = false;
+                ClearWindupReturnTracking();
             }
         }
 
@@ -952,6 +964,8 @@ public class SlapMechanics : MonoBehaviour
         if (!windupTriggered)
         {
             RepinFeetLocalPoseNow();
+            float carryFromCurrent = GetCurrentHandProgressForCombat();
+            ClearWindupReturnTracking();
             SetWindupStates(dir);
             if (!string.IsNullOrEmpty(currentWindupState))
             {
@@ -970,7 +984,7 @@ public class SlapMechanics : MonoBehaviour
             pendingTime = Time.time;
             windupTriggered = true;
             attackPhase = AttackPhase.WindupActive;
-            windupCarryOffset = animator != null ? Mathf.Clamp01(animator.GetFloat(handMoveParam)) : 0f;
+            windupCarryOffset = Mathf.Clamp01(carryFromCurrent);
             maxProgress = windupCarryOffset;
             maxProjectedPx = 0f;
             reverseSwipePeakCmPerSec = 0f;
@@ -1058,7 +1072,7 @@ public class SlapMechanics : MonoBehaviour
             return true;
         }
 
-        float currentHand = animator.GetFloat(handMoveParam);
+        float currentHand = GetCurrentHandProgressForCombat();
         float effectiveWindup = Mathf.Max(currentHand, maxProgress);
         if (effectiveWindup < minWindupForSlap)
         {
@@ -1075,6 +1089,7 @@ public class SlapMechanics : MonoBehaviour
             reverseAccumulatedPx = 0f;
             reverseIntentHeldSeconds = 0f;
             windupTriggered = false;
+            ClearWindupReturnTracking();
             lastSwipePos = pos;
             lastSwipeSampleTime = now;
             windupStartTimeSet = false;
@@ -1113,6 +1128,7 @@ public class SlapMechanics : MonoBehaviour
             attackPhase = AttackPhase.SlapActive;
             inputLockedAfterSlap = true;
             swipeActive = false;
+            ClearWindupReturnTracking();
             lastSlapDir = attackDir;
             RaiseSlapFired();
         }
@@ -1188,6 +1204,7 @@ public class SlapMechanics : MonoBehaviour
         if (!canceledWindup)
         {
             pendingDir = Dir.None;
+            ClearWindupReturnTracking();
         }
         windupTriggered = false;
         maxProjectedPx = 0f;
@@ -1208,6 +1225,7 @@ public class SlapMechanics : MonoBehaviour
         int hash = Animator.StringToHash(idleStateName);
         if (!animator.HasState(0, hash)) return;
         float fade = GetWindupReturnCrossfadeSeconds();
+        StartWindupReturnTracking(fade);
         animator.CrossFadeInFixedTime(hash, fade, 0, 0f, 0f);
         attackPhase = AttackPhase.ReturningAfterWindup;
     }
@@ -1945,6 +1963,63 @@ public class SlapMechanics : MonoBehaviour
         return Mathf.SmoothDamp(value, 0f, ref handVelocity, smoothTime);
     }
 
+    private void StartWindupReturnTracking(float durationSeconds)
+    {
+        float current = 0f;
+        if (animator != null && !string.IsNullOrEmpty(handMoveParam))
+        {
+            current = animator.GetFloat(handMoveParam);
+        }
+
+        windupReturnStart01 = Mathf.Clamp01(Mathf.Max(current, maxProgress));
+        windupReturnStartTime = Time.time;
+        windupReturnDuration = Mathf.Max(0.01f, durationSeconds);
+        windupReturnTrackingActive = windupReturnStart01 > 0.0001f;
+    }
+
+    private void ClearWindupReturnTracking()
+    {
+        windupReturnTrackingActive = false;
+        windupReturnStartTime = 0f;
+        windupReturnDuration = 0f;
+        windupReturnStart01 = 0f;
+    }
+
+    private float GetCurrentHandProgressForCombat()
+    {
+        float param = 0f;
+        if (animator != null && !string.IsNullOrEmpty(handMoveParam))
+        {
+            param = animator.GetFloat(handMoveParam);
+        }
+
+        bool neutralIdle =
+            attackPhase == AttackPhase.Idle &&
+            pendingDir == Dir.None &&
+            !windupTriggered &&
+            !inputLockedAfterSlap;
+        if (neutralIdle)
+        {
+            return 0f;
+        }
+
+        float fallback = Mathf.Clamp01(Mathf.Max(param, maxProgress));
+        bool useTrackedReturn =
+            windupReturnTrackingActive &&
+            attackPhase == AttackPhase.ReturningAfterWindup &&
+            !windupTriggered &&
+            !inputLockedAfterSlap;
+
+        if (!useTrackedReturn)
+        {
+            return fallback;
+        }
+
+        float t = Mathf.Clamp01((Time.time - windupReturnStartTime) / Mathf.Max(0.01f, windupReturnDuration));
+        float tracked = Mathf.Lerp(windupReturnStart01, 0f, t);
+        return Mathf.Clamp01(tracked);
+    }
+
     private void SetWindupStates(Dir dir)
     {
         currentWindupState = null;
@@ -2152,12 +2227,7 @@ public class SlapMechanics : MonoBehaviour
 
     public float GetDebugWindup01()
     {
-        float v = 0f;
-        if (animator != null && !string.IsNullOrEmpty(handMoveParam))
-        {
-            v = animator.GetFloat(handMoveParam);
-        }
-        return Mathf.Clamp01(Mathf.Max(v, maxProgress));
+        return GetCurrentHandProgressForCombat();
     }
 
     public float GetDebugSlapPower01()
@@ -2260,6 +2330,7 @@ public class SlapMechanics : MonoBehaviour
     private void ForceIdlePoseSample()
     {
         if (animator == null) return;
+        ClearWindupReturnTracking();
 
         if (!string.IsNullOrEmpty(handMoveParam))
         {
@@ -2278,6 +2349,7 @@ public class SlapMechanics : MonoBehaviour
     {
         if (role == newRole) return;
         role = newRole;
+        ClearWindupReturnTracking();
         aiBlockReacquireBlockedUntilTime = -999f;
         slapReturnTriggered = false;
         aiHardBlockLock = false;
@@ -3034,7 +3106,7 @@ public class SlapMechanics : MonoBehaviour
         ForceDisableIdleBreathingForCombatStart();
         SetWindupStates(d);
         if (string.IsNullOrEmpty(currentSlapState)) return;
-        float currentHand = animator != null ? animator.GetFloat(handMoveParam) : maxProgress;
+        float currentHand = GetCurrentHandProgressForCombat();
         SetSlapSpeed(swipeSpeedCmPerSec);
         if (animator != null && !string.IsNullOrEmpty(slapSpeedParam))
         {
@@ -3065,6 +3137,7 @@ public class SlapMechanics : MonoBehaviour
         attackPhase = AttackPhase.SlapActive;
         inputLockedAfterSlap = true;
         swipeActive = false;
+        ClearWindupReturnTracking();
         lastSlapDir = d;
         RaiseSlapFired();
 
@@ -3082,6 +3155,7 @@ public class SlapMechanics : MonoBehaviour
 
     public void AI_CancelWindup()
     {
+        ClearWindupReturnTracking();
         pendingDir = Dir.None;
         windupTriggered = false;
         maxProgress = 0f;
@@ -3102,6 +3176,7 @@ public class SlapMechanics : MonoBehaviour
 
     public void AI_SoftCancelWindup()
     {
+        ClearWindupReturnTracking();
         if (role == Role.Attacker && !inputLockedAfterSlap)
         {
             attackPhase = AttackPhase.ReturningAfterWindup;
@@ -4066,6 +4141,7 @@ public class SlapMechanics : MonoBehaviour
     private void BlendToIdlePose(float fadeSeconds)
     {
         if (animator == null) return;
+        ClearWindupReturnTracking();
         if (!string.IsNullOrEmpty(handMoveParam))
         {
             animator.SetFloat(handMoveParam, 0f);

@@ -8,6 +8,12 @@ public class HandsOnlyIdleCopy : MonoBehaviour
     private static readonly int ColorId = Shader.PropertyToID("_Color");
     private static readonly int BaseColorId = Shader.PropertyToID("_BaseColor");
     private static readonly int EmissionColorId = Shader.PropertyToID("_EmissionColor");
+    private static readonly int EdgeColorId = Shader.PropertyToID("_EdgeColor");
+    private static readonly int EdgeIntensityId = Shader.PropertyToID("_EdgeIntensity");
+    private static readonly int EdgePowerId = Shader.PropertyToID("_EdgePower");
+    private static readonly int EdgeWidthId = Shader.PropertyToID("_EdgeWidth");
+    private static readonly int FistGlowStrengthId = Shader.PropertyToID("_FistGlowStrength");
+    private static readonly int FistGlowTintId = Shader.PropertyToID("_FistGlowTint");
     private static readonly int MainTexId = Shader.PropertyToID("_MainTex");
     private static readonly int BaseMapId = Shader.PropertyToID("_BaseMap");
     private static readonly int SurfaceId = Shader.PropertyToID("_Surface");
@@ -47,6 +53,12 @@ public class HandsOnlyIdleCopy : MonoBehaviour
     [SerializeField, Range(0f, 1f)] private float glowMinIntensity = 0f;
     [SerializeField] private float glowMaxIntensity = 2.5f;
     [SerializeField] private float glowBlendSpeed = 14f;
+    [SerializeField] private Color contourColor = new Color(0.92f, 0.97f, 1f, 1f);
+    [SerializeField, Range(0f, 10f)] private float contourIntensity = 0f;
+    [SerializeField, Range(1f, 12f)] private float contourPower = 6f;
+    [SerializeField, Range(0.01f, 1f)] private float contourWidth = 0.22f;
+    [SerializeField, Range(0f, 10f)] private float fistGlowStrength = 0f;
+    [SerializeField] private Color fistGlowTint = new Color(0.92f, 0.97f, 1f, 1f);
 
     private const string PoseRigContainerName = "HandsPoseRig";
     private const string LeftHandMeshName = "LeftHandOnlyMesh";
@@ -97,6 +109,13 @@ public class HandsOnlyIdleCopy : MonoBehaviour
     private void Start()
     {
         TryBuild(false);
+    }
+
+    private void OnValidate()
+    {
+        if (!isActiveAndEnabled) return;
+        EnsureRuntimeObjects();
+        TryBuild(true);
     }
 
     private void OnDisable()
@@ -268,9 +287,11 @@ public class HandsOnlyIdleCopy : MonoBehaviour
         var leftBones = new HashSet<int>();
         var leftShoulderBones = new HashSet<int>();
         var leftArmBones = new HashSet<int>();
+        var leftFistBones = new HashSet<int>();
         var rightBones = new HashSet<int>();
         var rightShoulderBones = new HashSet<int>();
         var rightArmBones = new HashSet<int>();
+        var rightFistBones = new HashSet<int>();
 
         for (int i = 0; i < src.bones.Length; i++)
         {
@@ -283,12 +304,14 @@ public class HandsOnlyIdleCopy : MonoBehaviour
                 leftBones.Add(i);
                 if (IsShoulderBoneName(n)) leftShoulderBones.Add(i);
                 else if (IsUpperArmBoneName(n)) leftArmBones.Add(i);
+                if (IsFistBoneName(n)) leftFistBones.Add(i);
             }
             else if (BoneNameIsRight(n))
             {
                 rightBones.Add(i);
                 if (IsShoulderBoneName(n)) rightShoulderBones.Add(i);
                 else if (IsUpperArmBoneName(n)) rightArmBones.Add(i);
+                if (IsFistBoneName(n)) rightFistBones.Add(i);
             }
         }
 
@@ -298,10 +321,10 @@ public class HandsOnlyIdleCopy : MonoBehaviour
         if (poseBones == null || poseBones.Length != src.bones.Length) return;
 
         Mesh leftMesh = leftBones.Count > 0
-            ? BuildHandOnlyMesh(src, leftBones, leftShoulderBones, leftArmBones, "_LeftHandOnly")
+            ? BuildHandOnlyMesh(src, leftBones, leftShoulderBones, leftArmBones, leftFistBones, "_LeftHandOnly")
             : null;
         Mesh rightMesh = rightBones.Count > 0
-            ? BuildHandOnlyMesh(src, rightBones, rightShoulderBones, rightArmBones, "_RightHandOnly")
+            ? BuildHandOnlyMesh(src, rightBones, rightShoulderBones, rightArmBones, rightFistBones, "_RightHandOnly")
             : null;
 
         if (leftMesh != null)
@@ -565,6 +588,7 @@ public class HandsOnlyIdleCopy : MonoBehaviour
         HashSet<int> allowedBones,
         HashSet<int> shoulderBones,
         HashSet<int> armBones,
+        HashSet<int> fistBones,
         string suffix)
     {
         Mesh src = source.sharedMesh;
@@ -573,6 +597,7 @@ public class HandsOnlyIdleCopy : MonoBehaviour
 
         var keepVertex = new bool[src.vertexCount];
         var vertexAlpha = new float[src.vertexCount];
+        var fistMask = new float[src.vertexCount];
         var boneWeights = src.boneWeights;
         for (int i = 0; i < boneWeights.Length; i++)
         {
@@ -591,9 +616,11 @@ public class HandsOnlyIdleCopy : MonoBehaviour
                 rest01 +
                 shoulder01 * Mathf.Clamp01(shoulderOpacityMultiplier) +
                 arm01 * Mathf.Clamp01(armOpacityMultiplier);
+            float fistWeight = GetBoneSetWeight(bw, fistBones);
 
             keepVertex[i] = true;
             vertexAlpha[i] = Mathf.Clamp01(alphaMul);
+            fistMask[i] = Mathf.Clamp01(fistWeight / safeHandWeight);
         }
 
         int[] tris = src.triangles;
@@ -625,6 +652,7 @@ public class HandsOnlyIdleCopy : MonoBehaviour
         var newNormals = (srcNormals != null && srcNormals.Length == srcVerts.Length) ? new List<Vector3>(used.Count) : null;
         var newTangents = (srcTangents != null && srcTangents.Length == srcVerts.Length) ? new List<Vector4>(used.Count) : null;
         var newUv = (srcUv != null && srcUv.Length == srcVerts.Length) ? new List<Vector2>(used.Count) : null;
+        var newUv2 = new List<Vector2>(used.Count);
         var newColors = new List<Color32>(used.Count);
         var newBw = new List<BoneWeight>(used.Count);
 
@@ -636,6 +664,7 @@ public class HandsOnlyIdleCopy : MonoBehaviour
             if (newNormals != null) newNormals.Add(srcNormals[oldIndex]);
             if (newTangents != null) newTangents.Add(srcTangents[oldIndex]);
             if (newUv != null) newUv.Add(srcUv[oldIndex]);
+            newUv2.Add(new Vector2(Mathf.Clamp01(fistMask[oldIndex]), 0f));
             byte alphaByte = (byte)Mathf.RoundToInt(Mathf.Clamp01(vertexAlpha[oldIndex]) * 255f);
             newColors.Add(new Color32(255, 255, 255, alphaByte));
             newBw.Add(boneWeights[oldIndex]);
@@ -653,6 +682,7 @@ public class HandsOnlyIdleCopy : MonoBehaviour
         if (newNormals != null) handMesh.SetNormals(newNormals);
         if (newTangents != null) handMesh.SetTangents(newTangents);
         if (newUv != null) handMesh.SetUVs(0, newUv);
+        handMesh.SetUVs(1, newUv2);
         handMesh.SetColors(newColors);
         handMesh.boneWeights = newBw.ToArray();
         handMesh.bindposes = src.bindposes;
@@ -693,9 +723,26 @@ public class HandsOnlyIdleCopy : MonoBehaviour
 
     private Material GetOrCreateAvatarMaterial(SkinnedMeshRenderer source)
     {
+        const string preferredShaderName = "Unlit/HandsAvatarGradientUnlit";
+
         if (avatarMaterial != null)
         {
             string currentShaderName = avatarMaterial.shader != null ? avatarMaterial.shader.name : string.Empty;
+            if (string.Equals(currentShaderName, preferredShaderName, System.StringComparison.Ordinal))
+            {
+                return avatarMaterial;
+            }
+
+            Shader preferred = Shader.Find(preferredShaderName);
+            if (preferred != null)
+            {
+                avatarMaterial.shader = preferred;
+                ConfigureMaterialForTransparency(avatarMaterial);
+                StripTexture(avatarMaterial);
+                ApplyAccentMaterialSettings(avatarMaterial);
+                return avatarMaterial;
+            }
+
             if (!string.Equals(currentShaderName, "Unlit/Color", System.StringComparison.Ordinal))
             {
                 return avatarMaterial;
@@ -704,7 +751,7 @@ public class HandsOnlyIdleCopy : MonoBehaviour
             CleanupAvatarMaterial();
         }
 
-        Shader shader = Shader.Find("Unlit/HandsAvatarGradientUnlit");
+        Shader shader = Shader.Find(preferredShaderName);
         if (shader == null) shader = Shader.Find("Universal Render Pipeline/Unlit");
         if (shader == null) shader = Shader.Find("Standard");
         if (shader == null) shader = Shader.Find("Sprites/Default");
@@ -720,6 +767,7 @@ public class HandsOnlyIdleCopy : MonoBehaviour
         StripTexture(avatarMaterial);
         ApplyColor(avatarMaterial, GetIdleFogColor());
         ApplyEmission(avatarMaterial, Color.black);
+        ApplyAccentMaterialSettings(avatarMaterial);
         avatarMaterial.EnableKeyword("_EMISSION");
         return avatarMaterial;
     }
@@ -766,6 +814,7 @@ public class HandsOnlyIdleCopy : MonoBehaviour
 
         ConfigureMaterialForTransparency(mat);
         StripTexture(mat);
+        ApplyAccentMaterialSettings(mat);
 
         if (leftRenderer != null && leftRenderer.sharedMaterial != mat)
         {
@@ -922,6 +971,8 @@ public class HandsOnlyIdleCopy : MonoBehaviour
             if (avatarMaterial == null) return;
         }
 
+        ApplyAccentMaterialSettings(avatarMaterial);
+
         if (!useCombatGlow)
         {
             glowProgressSmoothed = 0f;
@@ -930,12 +981,12 @@ public class HandsOnlyIdleCopy : MonoBehaviour
             Color idleFog = GetFogColor(idleOpacity);
             Color idleBaseColor = new Color(pearl.r, pearl.g, pearl.b, idleFog.a);
             Color idlePearlEmission = pearl * Mathf.Max(0f, pearlIdleGlowIntensity);
-            ApplyHandRendererVisual(leftRenderer, leftPropertyBlock, idleBaseColor, idlePearlEmission, leftHandFade01);
-            ApplyHandRendererVisual(leftArmRenderer, leftPropertyBlock, idleBaseColor, idlePearlEmission, leftHandFade01 * armOpacityMultiplier);
-            ApplyHandRendererVisual(leftShoulderRenderer, leftPropertyBlock, idleBaseColor, idlePearlEmission, leftHandFade01 * shoulderOpacityMultiplier);
-            ApplyHandRendererVisual(rightRenderer, rightPropertyBlock, idleBaseColor, idlePearlEmission, rightHandFade01);
-            ApplyHandRendererVisual(rightArmRenderer, rightPropertyBlock, idleBaseColor, idlePearlEmission, rightHandFade01 * armOpacityMultiplier);
-            ApplyHandRendererVisual(rightShoulderRenderer, rightPropertyBlock, idleBaseColor, idlePearlEmission, rightHandFade01 * shoulderOpacityMultiplier);
+            ApplyHandRendererVisual(leftRenderer, leftPropertyBlock, idleBaseColor, idlePearlEmission, leftHandFade01, Mathf.Max(0f, contourIntensity));
+            ApplyHandRendererVisual(leftArmRenderer, leftPropertyBlock, idleBaseColor, idlePearlEmission, leftHandFade01 * armOpacityMultiplier, Mathf.Max(0f, contourIntensity));
+            ApplyHandRendererVisual(leftShoulderRenderer, leftPropertyBlock, idleBaseColor, idlePearlEmission, leftHandFade01 * shoulderOpacityMultiplier, 0f);
+            ApplyHandRendererVisual(rightRenderer, rightPropertyBlock, idleBaseColor, idlePearlEmission, rightHandFade01, Mathf.Max(0f, contourIntensity));
+            ApplyHandRendererVisual(rightArmRenderer, rightPropertyBlock, idleBaseColor, idlePearlEmission, rightHandFade01 * armOpacityMultiplier, Mathf.Max(0f, contourIntensity));
+            ApplyHandRendererVisual(rightShoulderRenderer, rightPropertyBlock, idleBaseColor, idlePearlEmission, rightHandFade01 * shoulderOpacityMultiplier, 0f);
             return;
         }
 
@@ -964,12 +1015,12 @@ public class HandsOnlyIdleCopy : MonoBehaviour
         Color combatEmission = targetColor * intensity * Mathf.Clamp01(alpha * 3f);
         Color emissionColor = pearlEmission + combatEmission;
 
-        ApplyHandRendererVisual(leftRenderer, leftPropertyBlock, baseColor, emissionColor, leftHandFade01);
-        ApplyHandRendererVisual(leftArmRenderer, leftPropertyBlock, baseColor, emissionColor, leftHandFade01 * armOpacityMultiplier);
-        ApplyHandRendererVisual(leftShoulderRenderer, leftPropertyBlock, baseColor, emissionColor, leftHandFade01 * shoulderOpacityMultiplier);
-        ApplyHandRendererVisual(rightRenderer, rightPropertyBlock, baseColor, emissionColor, rightHandFade01);
-        ApplyHandRendererVisual(rightArmRenderer, rightPropertyBlock, baseColor, emissionColor, rightHandFade01 * armOpacityMultiplier);
-        ApplyHandRendererVisual(rightShoulderRenderer, rightPropertyBlock, baseColor, emissionColor, rightHandFade01 * shoulderOpacityMultiplier);
+        ApplyHandRendererVisual(leftRenderer, leftPropertyBlock, baseColor, emissionColor, leftHandFade01, Mathf.Max(0f, contourIntensity));
+        ApplyHandRendererVisual(leftArmRenderer, leftPropertyBlock, baseColor, emissionColor, leftHandFade01 * armOpacityMultiplier, Mathf.Max(0f, contourIntensity));
+        ApplyHandRendererVisual(leftShoulderRenderer, leftPropertyBlock, baseColor, emissionColor, leftHandFade01 * shoulderOpacityMultiplier, 0f);
+        ApplyHandRendererVisual(rightRenderer, rightPropertyBlock, baseColor, emissionColor, rightHandFade01, Mathf.Max(0f, contourIntensity));
+        ApplyHandRendererVisual(rightArmRenderer, rightPropertyBlock, baseColor, emissionColor, rightHandFade01 * armOpacityMultiplier, Mathf.Max(0f, contourIntensity));
+        ApplyHandRendererVisual(rightShoulderRenderer, rightPropertyBlock, baseColor, emissionColor, rightHandFade01 * shoulderOpacityMultiplier, 0f);
     }
 
     private void GetGlowTarget(out Color targetColor, out float targetProgress)
@@ -1068,12 +1119,25 @@ public class HandsOnlyIdleCopy : MonoBehaviour
         else mat.DisableKeyword("_EMISSION");
     }
 
+    private void ApplyAccentMaterialSettings(Material mat)
+    {
+        if (mat == null) return;
+
+        if (mat.HasProperty(EdgeColorId)) mat.SetColor(EdgeColorId, contourColor);
+        if (mat.HasProperty(EdgeIntensityId)) mat.SetFloat(EdgeIntensityId, Mathf.Max(0f, contourIntensity));
+        if (mat.HasProperty(EdgePowerId)) mat.SetFloat(EdgePowerId, Mathf.Max(1f, contourPower));
+        if (mat.HasProperty(EdgeWidthId)) mat.SetFloat(EdgeWidthId, Mathf.Clamp01(contourWidth));
+        if (mat.HasProperty(FistGlowStrengthId)) mat.SetFloat(FistGlowStrengthId, Mathf.Max(0f, fistGlowStrength));
+        if (mat.HasProperty(FistGlowTintId)) mat.SetColor(FistGlowTintId, fistGlowTint);
+    }
+
     private static void ApplyHandRendererVisual(
         SkinnedMeshRenderer renderer,
         MaterialPropertyBlock block,
         Color baseColor,
         Color emissionColor,
-        float handFade01)
+        float handFade01,
+        float contourIntensityScale)
     {
         if (renderer == null) return;
         if (block == null) return;
@@ -1086,6 +1150,7 @@ public class HandsOnlyIdleCopy : MonoBehaviour
         block.SetColor(ColorId, c);
         block.SetColor(BaseColorId, c);
         block.SetColor(EmissionColorId, e);
+        block.SetFloat(EdgeIntensityId, Mathf.Max(0f, contourIntensityScale));
         renderer.SetPropertyBlock(block);
     }
 
@@ -1109,6 +1174,16 @@ public class HandsOnlyIdleCopy : MonoBehaviour
         bool notShoulder = !IsShoulderBoneName(lowerName);
         bool notHand = !lowerName.Contains("hand");
         return arm && notForearm && notShoulder && notHand;
+    }
+
+    private static bool IsFistBoneName(string lowerName)
+    {
+        return lowerName.Contains("hand") ||
+               lowerName.Contains("thumb") ||
+               lowerName.Contains("index") ||
+               lowerName.Contains("middle") ||
+               lowerName.Contains("ring") ||
+               lowerName.Contains("pinky");
     }
 
     private static bool IsHandBoneName(string lowerName)

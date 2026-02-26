@@ -6202,6 +6202,12 @@ MonoBehaviour:
   glowMinIntensity: 0
   glowMaxIntensity: 4
   glowBlendSpeed: 14
+  contourColor: {r: 0.92, g: 0.97, b: 1, a: 1}
+  contourIntensity: 1
+  contourPower: 6
+  contourWidth: 0.22
+  fistGlowStrength: 0.3
+  fistGlowTint: {r: 0.92, g: 0.97, b: 1, a: 1}
 --- !u!1 &2147001100
 GameObject:
   m_ObjectHideFlags: 0
@@ -6273,6 +6279,12 @@ MonoBehaviour:
   glowMinIntensity: 0
   glowMaxIntensity: 4
   glowBlendSpeed: 14
+  contourColor: {r: 0.92, g: 0.97, b: 1, a: 1}
+  contourIntensity: 1
+  contourPower: 6
+  contourWidth: 0.22
+  fistGlowStrength: 0.3
+  fistGlowTint: {r: 0.92, g: 0.97, b: 1, a: 1}
 --- !u!1660057539 &9223372036854775807
 SceneRoots:
   m_ObjectHideFlags: 0
