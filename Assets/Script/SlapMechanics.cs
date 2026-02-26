@@ -1604,8 +1604,9 @@ public class SlapMechanics : MonoBehaviour
         attackHandStartPinned = true;
     }
 
-    private AttackHand DetermineActiveAttackHand()
+    private bool TryDetermineMovedAttackHand(out AttackHand hand)
     {
+        hand = AttackHand.Both;
         CacheAttackHandBonesIfNeeded();
         PinAttackHandStartIfNeeded();
 
@@ -1627,11 +1628,30 @@ public class SlapMechanics : MonoBehaviour
         const float minMove = 0.00002f;
         if (leftMove < minMove && rightMove < minMove)
         {
-            return GetPreferredAttackHand();
+            return false;
         }
-        if (leftMove > rightMove * 1.15f) return AttackHand.Left;
-        if (rightMove > leftMove * 1.15f) return AttackHand.Right;
-        return leftMove >= rightMove ? AttackHand.Left : AttackHand.Right;
+        if (leftMove > rightMove * 1.15f)
+        {
+            hand = AttackHand.Left;
+            return true;
+        }
+        if (rightMove > leftMove * 1.15f)
+        {
+            hand = AttackHand.Right;
+            return true;
+        }
+
+        hand = leftMove >= rightMove ? AttackHand.Left : AttackHand.Right;
+        return true;
+    }
+
+    private AttackHand DetermineActiveAttackHand()
+    {
+        if (TryDetermineMovedAttackHand(out var hand))
+        {
+            return hand;
+        }
+        return GetPreferredAttackHand();
     }
 
     private AttackHand GetPreferredAttackHand()
@@ -2557,21 +2577,23 @@ public class SlapMechanics : MonoBehaviour
 
         if (role == Role.Attacker)
         {
-            AttackHand hand = activeAttackHand;
-            if (hand == AttackHand.Both)
+            AttackHand hand = AttackHand.Both;
+
+            if (swipeAttackHandLocked && (swipeAttackHand == AttackHand.Left || swipeAttackHand == AttackHand.Right))
             {
-                if (swipeAttackHand == AttackHand.Left || swipeAttackHand == AttackHand.Right)
-                {
-                    hand = swipeAttackHand;
-                }
-                else if (TryResolveHorizontalAttackHand(out var horizontalHand) && horizontalHand != AttackHand.Both)
-                {
-                    hand = horizontalHand;
-                }
-                else
-                {
-                    hand = GetPreferredAttackHand();
-                }
+                hand = swipeAttackHand;
+            }
+            else if (activeAttackHand == AttackHand.Left || activeAttackHand == AttackHand.Right)
+            {
+                hand = activeAttackHand;
+            }
+            else if (TryResolveHorizontalAttackHand(out var horizontalHand) && horizontalHand != AttackHand.Both)
+            {
+                hand = horizontalHand;
+            }
+            else if (!TryDetermineMovedAttackHand(out hand) || hand == AttackHand.Both)
+            {
+                hand = GetPreferredAttackHand();
             }
 
             return hand == AttackHand.Right ? VisualHand.Right : VisualHand.Left;
