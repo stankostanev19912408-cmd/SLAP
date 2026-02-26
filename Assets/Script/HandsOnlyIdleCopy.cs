@@ -896,6 +896,16 @@ public class HandsOnlyIdleCopy : MonoBehaviour
             float speed = 1f / Mathf.Max(0.01f, handFadeSeconds);
             leftHandFade01 = Mathf.MoveTowards(leftHandFade01, leftTarget ? 1f : 0f, speed * dt);
             rightHandFade01 = Mathf.MoveTowards(rightHandFade01, rightTarget ? 1f : 0f, speed * dt);
+
+            // Only one attacking hand should be visible at a time.
+            if (leftTarget && !rightTarget)
+            {
+                rightHandFade01 = 0f;
+            }
+            else if (rightTarget && !leftTarget)
+            {
+                leftHandFade01 = 0f;
+            }
         }
 
         bool leftVisibleNow = leftTarget || leftHandFade01 > 0.001f;
