@@ -8,15 +8,47 @@ using UnityEditor;
 public class SlapCombatManager : MonoBehaviour
 {
     public static SlapCombatManager Instance { get; private set; }
+    public struct HitResolvedEvent
+    {
+        public SlapMechanics attacker;
+        public SlapMechanics defender;
+        public SlapMechanics.SlapDirection direction;
+        public bool blocked;
+        public bool perfectBlock;
+        public float slapProgressAtResolve;
+        public float resolveAtProgress;
+        public float baseDamagePercent;
+        public float finalDamagePercent;
+        public float appliedDamage;
+        public bool attackerExhaustedDamagePenalty;
+        public float attackerStaminaBefore;
+        public float attackerStaminaAfter;
+        public float defenderHealthBefore;
+        public float defenderHealthAfter;
+    }
+
+    public struct StaminaDrainEvent
+    {
+        public SlapMechanics actor;
+        public string reason;
+        public float amount;
+        public float ratePerSecond;
+        public float staminaBefore;
+        public float staminaAfter;
+    }
+
+    public static event System.Action<HitResolvedEvent> OnHitResolved;
+    public static event System.Action<StaminaDrainEvent> OnStaminaDrained;
 
     [Header("Stamina Drain")]
-    [SerializeField] private float staminaDrainSeconds = 10f;
+    [SerializeField] private float staminaDrainSeconds = 25f;
 
     [Header("Actors")]
     [SerializeField] private string playerName = "idle";
     [SerializeField] private string aiName = "idle (1)";
     [Header("Start")]
     [SerializeField] private bool requireTapToStart = true;
+    [SerializeField] private bool autoStartBattleInDebug = true;
     [Header("Camera")]
     [SerializeField] private bool attachMainCameraToIdleHead = true;
     [SerializeField] private Vector3 idleHeadCameraLocalOffset = new Vector3(0f, 0.0255f, 0.08f);
@@ -150,6 +182,11 @@ public class SlapCombatManager : MonoBehaviour
         DontDestroyOnLoad(go);
     }
 
+    public float GetStaminaDrainSeconds()
+    {
+        return Mathf.Max(0.01f, staminaDrainSeconds);
+    }
+
     private void Awake()
     {
         EnsureHandsCopyHierarchyOnly();
@@ -178,7 +215,15 @@ public class SlapCombatManager : MonoBehaviour
         ResolveMissedSlapUpBlockReactionClip();
         ResolveMissedSlapErcutBlockReactionClip();
         FindActors();
-        if (!requireTapToStart)
+        bool shouldRequireTap = requireTapToStart;
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+        if (autoStartBattleInDebug)
+        {
+            shouldRequireTap = false;
+        }
+#endif
+
+        if (!shouldRequireTap)
         {
             StartBattle();
         }
@@ -416,7 +461,8 @@ public class SlapCombatManager : MonoBehaviour
         {
             pendingHitAttacker.InterruptSlapForSuccessfulBlock(blockedHitResolveProgress);
         }
-        float damagePercent = pendingDamagePercent;
+        float baseDamagePercent = pendingDamagePercent;
+        float damagePercent = baseDamagePercent;
 
         if (perfect || blocked)
         {
@@ -429,15 +475,27 @@ public class SlapCombatManager : MonoBehaviour
 
         var attackerStats = GetStats(pendingHitAttacker);
         var defenderStats = GetStats(pendingHitDefender);
+        float attackerStaminaBefore = attackerStats != null ? attackerStats.Stamina : 0f;
+        float attackerStaminaAfter = attackerStaminaBefore;
+        bool attackerExhaustedDamagePenalty = false;
         if (attackerStats != null && attackerStats.Stamina <= 0f && attackerStats.Health > 0f)
         {
+            attackerExhaustedDamagePenalty = true;
             damagePercent *= 0.5f;
         }
 
+        float defenderHealthBefore = defenderStats != null ? defenderStats.Health : 0f;
+        float defenderHealthAfter = defenderHealthBefore;
+        float appliedDamage = 0f;
         if (defenderStats != null)
         {
             float dmg = damagePercent * (defenderStats.MaxHealth / 100f);
-            defenderStats.TakeDamage(dmg);
+            appliedDamage = defenderStats.TakeDamage(dmg);
+            defenderHealthAfter = defenderStats.Health;
+            if (attackerStats != null)
+            {
+                attackerStaminaAfter = attackerStats.Stamina;
+            }
             if (defenderStats.Health <= 0f)
             {
                 gameOver = true;
@@ -493,6 +551,24 @@ public class SlapCombatManager : MonoBehaviour
         }
 
         SetHitMessage(pendingHitAttacker, pendingHitDefender, blocked || perfect);
+        OnHitResolved?.Invoke(new HitResolvedEvent
+        {
+            attacker = pendingHitAttacker,
+            defender = pendingHitDefender,
+            direction = pendingHitDir,
+            blocked = blocked,
+            perfectBlock = perfect,
+            slapProgressAtResolve = slapProgress,
+            resolveAtProgress = resolveAtProgress,
+            baseDamagePercent = baseDamagePercent,
+            finalDamagePercent = damagePercent,
+            appliedDamage = appliedDamage,
+            attackerExhaustedDamagePenalty = attackerExhaustedDamagePenalty,
+            attackerStaminaBefore = attackerStaminaBefore,
+            attackerStaminaAfter = attackerStaminaAfter,
+            defenderHealthBefore = defenderHealthBefore,
+            defenderHealthAfter = defenderHealthAfter
+        });
 
         pendingHit = false;
 
@@ -1467,12 +1543,38 @@ public class SlapCombatManager : MonoBehaviour
         if (attackerStats != null && attacker != null && attacker.IsAttackerWindupHolding())
         {
             float rate = attackerStats.MaxStamina / Mathf.Max(0.01f, staminaDrainSeconds);
-            attackerStats.SpendStamina(rate * Time.deltaTime);
+            float before = attackerStats.Stamina;
+            float spent = attackerStats.SpendStamina(rate * Time.deltaTime);
+            if (spent > 0f)
+            {
+                OnStaminaDrained?.Invoke(new StaminaDrainEvent
+                {
+                    actor = attacker,
+                    reason = "attacker_windup",
+                    amount = spent,
+                    ratePerSecond = rate,
+                    staminaBefore = before,
+                    staminaAfter = attackerStats.Stamina
+                });
+            }
         }
         if (defenderStats != null && defender != null && defender.IsDefenderBlocking())
         {
             float rate = defenderStats.MaxStamina / Mathf.Max(0.01f, staminaDrainSeconds);
-            defenderStats.SpendStamina(rate * Time.deltaTime);
+            float before = defenderStats.Stamina;
+            float spent = defenderStats.SpendStamina(rate * Time.deltaTime);
+            if (spent > 0f)
+            {
+                OnStaminaDrained?.Invoke(new StaminaDrainEvent
+                {
+                    actor = defender,
+                    reason = "defender_block",
+                    amount = spent,
+                    ratePerSecond = rate,
+                    staminaBefore = before,
+                    staminaAfter = defenderStats.Stamina
+                });
+            }
         }
     }
 
@@ -1775,6 +1877,23 @@ public class SlapCombatManager : MonoBehaviour
     private void StartBattle()
     {
         if (battleStarted) return;
+        if (playerStats != null) playerStats.ResetToFull();
+        if (aiStats != null) aiStats.ResetToFull();
+
+        gameOver = false;
+        pendingHit = false;
+        pendingHitAttacker = null;
+        pendingHitDefender = null;
+        pendingDamagePercent = 0f;
+        pendingHitDir = SlapMechanics.SlapDirection.None;
+        pendingBlockedDir = SlapMechanics.SlapDirection.None;
+        pendingTurnSwitch = false;
+        pendingAttacker = null;
+        pendingFlip = false;
+        perfectTimer = 0f;
+        hitMessage = null;
+        hitMessageTimer = 0f;
+
         battleStarted = true;
         if (player != null)
         {
