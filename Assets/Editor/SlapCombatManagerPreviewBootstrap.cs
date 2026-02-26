@@ -9,7 +9,7 @@ using UnityEngine;
 [InitializeOnLoad]
 public static class SlapCombatManagerPreviewBootstrap
 {
-    private const bool AutoCreateManagerInEditor = false;
+    private static bool AutoCreateManagerInEditor => false;
 
     static SlapCombatManagerPreviewBootstrap()
     {
