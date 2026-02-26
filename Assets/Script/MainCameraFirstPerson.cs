@@ -29,6 +29,8 @@ public class MainCameraFirstPerson : MonoBehaviour
     private Transform targetHead;
     private Camera cachedCamera;
 
+    public string SourceFighterName => sourceFighterName;
+
     private void LateUpdate()
     {
         if (!Application.isPlaying && !applyInEditMode) return;
@@ -114,6 +116,11 @@ public class MainCameraFirstPerson : MonoBehaviour
         if (string.IsNullOrWhiteSpace(objectName)) return null;
         var go = GameObject.Find(objectName);
         return go != null ? go.transform : null;
+    }
+
+    public Transform GetSourceRootTransform()
+    {
+        return FindByName(sourceFighterName);
     }
 
     private static Transform FindHead(Transform root)
