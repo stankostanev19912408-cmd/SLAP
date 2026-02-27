@@ -2,6 +2,7 @@ using UnityEngine;
 #if UNITY_EDITOR
 using UnityEditor;
 #endif
+using UnityEngine.EventSystems;
 
 [ExecuteAlways]
 [DefaultExecutionOrder(-100)]
@@ -80,11 +81,13 @@ public class SlapCombatManager : MonoBehaviour
     [Header("Round Start")]
     [SerializeField] private bool playFirstAttackerIntro = true;
     [SerializeField] private string firstAttackerIntroName = "AKIROmodel@Arm Stretching";
+    [SerializeField] private AnimationClip firstAttackerIntroClip;
     [SerializeField] private float firstAttackerIntroFallbackSeconds = 1.2f;
     [SerializeField] private float firstAttackerIntroSpeedMultiplier = 1.7f;
     [SerializeField] private float firstAttackerIntroPostDelaySeconds = 0f;
     [SerializeField] private bool playFirstDefenderIntro = true;
     [SerializeField] private string firstDefenderIntroName = "AKIROmodel@Neck Stretching";
+    [SerializeField] private AnimationClip firstDefenderIntroClip;
     [SerializeField] private float firstDefenderIntroFallbackSeconds = 1.2f;
     [Header("Hit Reaction")]
     [SerializeField] private bool playMissedRightBlockReaction = true;
@@ -92,6 +95,10 @@ public class SlapCombatManager : MonoBehaviour
     [SerializeField] private string missedLeftBlockReactionName = "AKIROmodel@Falling Forward Death (1)";
     [SerializeField] private string missedSlapUpBlockReactionName = "AKIROmodel@Dying 1";
     [SerializeField] private string missedSlapErcutBlockReactionName = "AKIROmodel@Dyingslapercut";
+    [SerializeField] private AnimationClip missedRightBlockReactionClip;
+    [SerializeField] private AnimationClip missedLeftBlockReactionClip;
+    [SerializeField] private AnimationClip missedSlapUpBlockReactionClip;
+    [SerializeField] private AnimationClip missedSlapErcutBlockReactionClip;
     [SerializeField] private float missedRightBlockReactionFallbackSeconds = 1.2f;
     [Header("Hit Resolve Timing")]
     [SerializeField] private bool usePerDirectionHitResolveTiming = true;
@@ -138,6 +145,7 @@ public class SlapCombatManager : MonoBehaviour
     private GUIStyle turnStyle;
     private GUIStyle hitStyle;
     private GUIStyle startButtonStyle;
+    private GUIStyle replayButtonStyle;
     private GUIStyle difficultyLabelStyle;
     private GUIStyle difficultyButtonStyle;
     private GUIStyle difficultyButtonSelectedStyle;
@@ -186,6 +194,32 @@ public class SlapCombatManager : MonoBehaviour
     private const float StrengthMaxPerComponent = 50f;
     private const float AttackStrengthMax = 100f;
     private const float PerfectBlockProgressThreshold01 = 0.85f;
+    private static readonly string[] RequiredCombatStateNames =
+    {
+        "Akiro_Idle",
+        "Slap1_Windup",
+        "Slap1_Slap",
+        "Block1_Block"
+    };
+    private static readonly string[] CombatSignatureClipNames =
+    {
+        "Slap1_Windup",
+        "Slap1_Slap",
+        "SlapLeft_Windup",
+        "SlapLeft_Slap",
+        "SlapRight_Windup",
+        "SlapRight_Slap",
+        "SlapUp_Windup",
+        "SlapUp_Slap",
+        "SlaperCut_Windup",
+        "SlaperCut_Slap",
+        "Block1_Block",
+        "BlockLeft_Block",
+        "BlockRight_Block",
+        "BlockUp_Block",
+        "BlockerCut_Block",
+        "Akiro_Idle"
+    };
 
     public static void EnsureExists()
     {
@@ -297,6 +331,7 @@ public class SlapCombatManager : MonoBehaviour
         {
             if (player != null) player.allowHumanInput = false;
             aiAttackDelayTimer = 0f;
+            HandleStartMenuTouchFallback();
             UpdateEditHandsCopies();
             return;
         }
@@ -313,6 +348,10 @@ public class SlapCombatManager : MonoBehaviour
             {
                 gameOver = true;
             }
+        }
+        if (gameOver)
+        {
+            HandleReplayTouchFallback();
         }
         EnsureAuraVisibility();
         if (perfectTimer > 0f)
@@ -1417,6 +1456,7 @@ public class SlapCombatManager : MonoBehaviour
             EnsureGameOverStyle();
             var rect = new Rect(0f, Screen.height * 0.45f, Screen.width, 50f);
             GUI.Label(rect, "GAME OVER", gameOverStyle);
+            DrawReplayButton();
         }
 
         if (!gameOver)
@@ -1548,6 +1588,15 @@ public class SlapCombatManager : MonoBehaviour
         startButtonStyle.fontStyle = FontStyle.Bold;
     }
 
+    private void EnsureReplayButtonStyle()
+    {
+        if (replayButtonStyle != null) return;
+        replayButtonStyle = new GUIStyle(GUI.skin.button);
+        replayButtonStyle.alignment = TextAnchor.MiddleCenter;
+        replayButtonStyle.fontSize = 54;
+        replayButtonStyle.fontStyle = FontStyle.Bold;
+    }
+
     private void EnsureDifficultyStyles()
     {
         if (difficultyLabelStyle == null)
@@ -1579,34 +1628,35 @@ public class SlapCombatManager : MonoBehaviour
     {
         EnsureStartButtonStyle();
         EnsureDifficultyStyles();
-        float w = Mathf.Clamp(Screen.width * 0.68f, 440f, 920f);
-        float h = Mathf.Clamp(Screen.height * 0.28f, 180f, 340f);
-        float x = (Screen.width - w) * 0.5f;
-        float y = (Screen.height - h) * 0.5f;
-        DrawDifficultySelector(y);
-        var rect = new Rect(x, y, w, h);
+        Rect rect = GetStartButtonRect();
+        DrawDifficultySelector(rect.y);
         if (GUI.Button(rect, "SLAP", startButtonStyle))
         {
             StartBattle();
         }
     }
 
+    private void DrawReplayButton()
+    {
+        EnsureReplayButtonStyle();
+        Rect rect = GetReplayButtonRect();
+        if (GUI.Button(rect, "REPLAY", replayButtonStyle))
+        {
+            RestartBattle();
+        }
+    }
+
     private void DrawDifficultySelector(float startButtonY)
     {
         GameDifficulty selected = GameSettings.SelectedDifficulty;
-        float rowW = Mathf.Clamp(Screen.width * 0.62f, 460f, 920f);
-        float rowX = (Screen.width - rowW) * 0.5f;
-        float titleY = startButtonY - 130f;
+        GetDifficultyLayout(startButtonY, out float rowX, out float rowW, out float titleY);
         var titleRect = new Rect(rowX, titleY, rowW, 44f);
         GUI.Label(titleRect, "Difficulty", difficultyLabelStyle);
 
-        float spacing = 12f;
-        float buttonH = 58f;
-        float buttonW = (rowW - (spacing * 2f)) / 3f;
-        float buttonY = titleY + 52f;
-        DrawDifficultyButton(new Rect(rowX, buttonY, buttonW, buttonH), GameDifficulty.Easy, selected);
-        DrawDifficultyButton(new Rect(rowX + buttonW + spacing, buttonY, buttonW, buttonH), GameDifficulty.Normal, selected);
-        DrawDifficultyButton(new Rect(rowX + ((buttonW + spacing) * 2f), buttonY, buttonW, buttonH), GameDifficulty.Hard, selected);
+        GetDifficultyButtonRects(startButtonY, out Rect easyRect, out Rect normalRect, out Rect hardRect);
+        DrawDifficultyButton(easyRect, GameDifficulty.Easy, selected);
+        DrawDifficultyButton(normalRect, GameDifficulty.Normal, selected);
+        DrawDifficultyButton(hardRect, GameDifficulty.Hard, selected);
     }
 
     private void DrawDifficultyButton(Rect rect, GameDifficulty difficulty, GameDifficulty selected)
@@ -1621,6 +1671,132 @@ public class SlapCombatManager : MonoBehaviour
         GUI.color = prevColor;
         if (!clicked) return;
         GameSettings.SelectedDifficulty = difficulty;
+    }
+
+    private Rect GetStartButtonRect()
+    {
+        float w = Mathf.Clamp(Screen.width * 0.68f, 440f, 920f);
+        float h = Mathf.Clamp(Screen.height * 0.28f, 180f, 340f);
+        float x = (Screen.width - w) * 0.5f;
+        float y = (Screen.height - h) * 0.5f;
+        return new Rect(x, y, w, h);
+    }
+
+    private Rect GetReplayButtonRect()
+    {
+        float w = Mathf.Clamp(Screen.width * 0.38f, 220f, 520f);
+        float h = Mathf.Clamp(Screen.height * 0.10f, 70f, 120f);
+        float x = (Screen.width - w) * 0.5f;
+        float y = Screen.height * 0.57f;
+        return new Rect(x, y, w, h);
+    }
+
+    private void GetDifficultyLayout(float startButtonY, out float rowX, out float rowW, out float titleY)
+    {
+        rowW = Mathf.Clamp(Screen.width * 0.62f, 460f, 920f);
+        rowX = (Screen.width - rowW) * 0.5f;
+        titleY = startButtonY - 130f;
+    }
+
+    private void GetDifficultyButtonRects(float startButtonY, out Rect easyRect, out Rect normalRect, out Rect hardRect)
+    {
+        GetDifficultyLayout(startButtonY, out float rowX, out float rowW, out float titleY);
+        float spacing = 12f;
+        float buttonH = 58f;
+        float buttonW = (rowW - (spacing * 2f)) / 3f;
+        float buttonY = titleY + 52f;
+        easyRect = new Rect(rowX, buttonY, buttonW, buttonH);
+        normalRect = new Rect(rowX + buttonW + spacing, buttonY, buttonW, buttonH);
+        hardRect = new Rect(rowX + ((buttonW + spacing) * 2f), buttonY, buttonW, buttonH);
+    }
+
+    private static Vector2 ScreenToGuiPoint(Vector2 screenPos)
+    {
+        return new Vector2(screenPos.x, Screen.height - screenPos.y);
+    }
+
+    private static bool IsPointerOverUi(int fingerId = -1)
+    {
+        var eventSystem = EventSystem.current;
+        if (eventSystem == null) return false;
+        return fingerId >= 0
+            ? eventSystem.IsPointerOverGameObject(fingerId)
+            : eventSystem.IsPointerOverGameObject();
+    }
+
+    private void HandleStartMenuTouchFallback()
+    {
+        if (battleStarted) return;
+
+        if (Input.touchCount > 0)
+        {
+            for (int i = 0; i < Input.touchCount; i++)
+            {
+                Touch touch = Input.GetTouch(i);
+                if (touch.phase != TouchPhase.Began) continue;
+                if (HandleStartMenuTap(ScreenToGuiPoint(touch.position))) return;
+            }
+        }
+
+        if (Input.GetMouseButtonDown(0))
+        {
+            HandleStartMenuTap(ScreenToGuiPoint(Input.mousePosition));
+        }
+    }
+
+    private bool HandleStartMenuTap(Vector2 guiPoint)
+    {
+        Rect startRect = GetStartButtonRect();
+        GetDifficultyButtonRects(startRect.y, out Rect easyRect, out Rect normalRect, out Rect hardRect);
+
+        if (easyRect.Contains(guiPoint))
+        {
+            GameSettings.SelectedDifficulty = GameDifficulty.Easy;
+            return true;
+        }
+        if (normalRect.Contains(guiPoint))
+        {
+            GameSettings.SelectedDifficulty = GameDifficulty.Normal;
+            return true;
+        }
+        if (hardRect.Contains(guiPoint))
+        {
+            GameSettings.SelectedDifficulty = GameDifficulty.Hard;
+            return true;
+        }
+        if (startRect.Contains(guiPoint))
+        {
+            StartBattle();
+            return true;
+        }
+
+        return false;
+    }
+
+    private void HandleReplayTouchFallback()
+    {
+        if (!battleStarted || !gameOver) return;
+        Rect replayRect = GetReplayButtonRect();
+
+        if (Input.touchCount > 0)
+        {
+            for (int i = 0; i < Input.touchCount; i++)
+            {
+                Touch touch = Input.GetTouch(i);
+                if (touch.phase != TouchPhase.Began) continue;
+                if (IsPointerOverUi(touch.fingerId)) continue;
+                if (!replayRect.Contains(ScreenToGuiPoint(touch.position))) continue;
+                RestartBattle();
+                return;
+            }
+        }
+
+        if (Input.GetMouseButtonDown(0))
+        {
+            if (IsPointerOverUi()) return;
+            if (!replayRect.Contains(ScreenToGuiPoint(Input.mousePosition))) return;
+            RestartBattle();
+        }
     }
 
     private void DrainStamina()
@@ -1807,171 +1983,164 @@ public class SlapCombatManager : MonoBehaviour
 
     private void ResolveFirstAttackerIntroClip()
     {
-        resolvedFirstAttackerIntroClip = null;
-#if UNITY_EDITOR
-        const string introFbxPath = "Assets/Animation/Animations+/AKIROmodel@Arm Stretching.fbx";
-        var assets = AssetDatabase.LoadAllAssetsAtPath(introFbxPath);
-        if (assets != null)
+        resolvedFirstAttackerIntroClip = firstAttackerIntroClip;
+        if (resolvedFirstAttackerIntroClip == null)
         {
-            foreach (var obj in assets)
-            {
-                var clip = obj as AnimationClip;
-                if (clip == null) continue;
-                if (clip.name.StartsWith("__preview__", System.StringComparison.OrdinalIgnoreCase)) continue;
-                resolvedFirstAttackerIntroClip = clip;
-                break;
-            }
+            resolvedFirstAttackerIntroClip = FindRuntimeClipByNames(firstAttackerIntroName, "Arm Stretching");
         }
-        if (playFirstAttackerIntro && resolvedFirstAttackerIntroClip == null)
+#if UNITY_EDITOR
+        if (resolvedFirstAttackerIntroClip == null)
         {
-            Debug.LogWarning($"[SlapCombat] Attacker intro clip not found in '{introFbxPath}'.");
+            const string introFbxPath = "Assets/Animation/Animations+/AKIROmodel@Arm Stretching.fbx";
+            resolvedFirstAttackerIntroClip = LoadFirstClipAtPathEditor(introFbxPath);
         }
 #endif
+        if (playFirstAttackerIntro && resolvedFirstAttackerIntroClip == null)
+        {
+            Debug.LogWarning("[SlapCombat] Attacker intro clip is not resolved for runtime/build.");
+        }
     }
 
     private void ResolveFirstDefenderIntroClip()
     {
-        resolvedFirstDefenderIntroClip = null;
-#if UNITY_EDITOR
-        const string introFbxPath = "Assets/Animation/Animations+/AKIROmodel@Neck Stretching.fbx";
-        var assets = AssetDatabase.LoadAllAssetsAtPath(introFbxPath);
-        if (assets != null)
+        resolvedFirstDefenderIntroClip = firstDefenderIntroClip;
+        if (resolvedFirstDefenderIntroClip == null)
         {
-            foreach (var obj in assets)
-            {
-                var clip = obj as AnimationClip;
-                if (clip == null) continue;
-                if (clip.name.StartsWith("__preview__", System.StringComparison.OrdinalIgnoreCase)) continue;
-                resolvedFirstDefenderIntroClip = clip;
-                break;
-            }
+            resolvedFirstDefenderIntroClip = FindRuntimeClipByNames(firstDefenderIntroName, "Neck Stretching");
         }
-        if (playFirstDefenderIntro && resolvedFirstDefenderIntroClip == null)
+#if UNITY_EDITOR
+        if (resolvedFirstDefenderIntroClip == null)
         {
-            Debug.LogWarning($"[SlapCombat] Defender intro clip not found in '{introFbxPath}'.");
+            const string introFbxPath = "Assets/Animation/Animations+/AKIROmodel@Neck Stretching.fbx";
+            resolvedFirstDefenderIntroClip = LoadFirstClipAtPathEditor(introFbxPath);
         }
 #endif
+        if (playFirstDefenderIntro && resolvedFirstDefenderIntroClip == null)
+        {
+            Debug.LogWarning("[SlapCombat] Defender intro clip is not resolved for runtime/build.");
+        }
     }
 
     private void ResolveMissedRightBlockReactionClip()
     {
-        resolvedMissedRightBlockReactionClip = null;
+        resolvedMissedRightBlockReactionClip = missedRightBlockReactionClip;
+        if (resolvedMissedRightBlockReactionClip == null)
+        {
+            resolvedMissedRightBlockReactionClip = FindRuntimeClipByNames(missedRightBlockReactionName, "Falling Forward Death");
+        }
 #if UNITY_EDITOR
-        const string reactionFbxPath = "Assets/Animation/Animations+/AKIROmodel@Falling Forward Death.fbx";
-        string usedPath = null;
-        var assets = AssetDatabase.LoadAllAssetsAtPath(reactionFbxPath);
-        if (assets != null)
+        if (resolvedMissedRightBlockReactionClip == null)
         {
-            foreach (var obj in assets)
-            {
-                var clip = obj as AnimationClip;
-                if (clip == null) continue;
-                if (clip.name.StartsWith("__preview__", System.StringComparison.OrdinalIgnoreCase)) continue;
-                resolvedMissedRightBlockReactionClip = clip;
-                usedPath = reactionFbxPath;
-                break;
-            }
-        }
-        if (playMissedRightBlockReaction && resolvedMissedRightBlockReactionClip == null)
-        {
-            Debug.LogWarning($"[SlapCombat] Missed-right-block reaction clip not found in '{reactionFbxPath}'.");
-        }
-        else if (playMissedRightBlockReaction)
-        {
-            LogCombat($"[SlapCombat] Missed-right-block reaction ready from '{usedPath}', clip='{resolvedMissedRightBlockReactionClip.name}'.");
+            const string reactionFbxPath = "Assets/Animation/Animations+/AKIROmodel@Falling Forward Death.fbx";
+            resolvedMissedRightBlockReactionClip = LoadFirstClipAtPathEditor(reactionFbxPath);
         }
 #endif
+        if (playMissedRightBlockReaction && resolvedMissedRightBlockReactionClip == null)
+        {
+            Debug.LogWarning("[SlapCombat] Missed-right-block reaction clip is not resolved for runtime/build.");
+        }
     }
 
     private void ResolveMissedLeftBlockReactionClip()
     {
-        resolvedMissedLeftBlockReactionClip = null;
+        resolvedMissedLeftBlockReactionClip = missedLeftBlockReactionClip;
+        if (resolvedMissedLeftBlockReactionClip == null)
+        {
+            resolvedMissedLeftBlockReactionClip = FindRuntimeClipByNames(missedLeftBlockReactionName, "Falling Forward Death");
+        }
 #if UNITY_EDITOR
-        const string reactionFbxPath = "Assets/Animation/Animations+/AKIROmodel@Falling Forward Death (1).fbx";
-        string usedPath = null;
-        var assets = AssetDatabase.LoadAllAssetsAtPath(reactionFbxPath);
-        if (assets != null)
+        if (resolvedMissedLeftBlockReactionClip == null)
         {
-            foreach (var obj in assets)
-            {
-                var clip = obj as AnimationClip;
-                if (clip == null) continue;
-                if (clip.name.StartsWith("__preview__", System.StringComparison.OrdinalIgnoreCase)) continue;
-                resolvedMissedLeftBlockReactionClip = clip;
-                usedPath = reactionFbxPath;
-                break;
-            }
-        }
-        if (playMissedRightBlockReaction && resolvedMissedLeftBlockReactionClip == null)
-        {
-            Debug.LogWarning($"[SlapCombat] Missed-left-block reaction clip not found in '{reactionFbxPath}'.");
-        }
-        else if (playMissedRightBlockReaction)
-        {
-            LogCombat($"[SlapCombat] Missed-left-block reaction ready from '{usedPath}', clip='{resolvedMissedLeftBlockReactionClip.name}'.");
+            const string reactionFbxPath = "Assets/Animation/Animations+/AKIROmodel@Falling Forward Death (1).fbx";
+            resolvedMissedLeftBlockReactionClip = LoadFirstClipAtPathEditor(reactionFbxPath);
         }
 #endif
+        if (playMissedRightBlockReaction && resolvedMissedLeftBlockReactionClip == null)
+        {
+            Debug.LogWarning("[SlapCombat] Missed-left-block reaction clip is not resolved for runtime/build.");
+        }
     }
 
     private void ResolveMissedSlapUpBlockReactionClip()
     {
-        resolvedMissedSlapUpBlockReactionClip = null;
+        resolvedMissedSlapUpBlockReactionClip = missedSlapUpBlockReactionClip;
+        if (resolvedMissedSlapUpBlockReactionClip == null)
+        {
+            resolvedMissedSlapUpBlockReactionClip = FindRuntimeClipByNames(missedSlapUpBlockReactionName, "Dying 1");
+        }
 #if UNITY_EDITOR
-        const string reactionFbxPath = "Assets/Animation/Animations+/AKIROmodel@Dying 1.fbx";
-        string usedPath = null;
-        var assets = AssetDatabase.LoadAllAssetsAtPath(reactionFbxPath);
-        if (assets != null)
+        if (resolvedMissedSlapUpBlockReactionClip == null)
         {
-            foreach (var obj in assets)
-            {
-                var clip = obj as AnimationClip;
-                if (clip == null) continue;
-                if (clip.name.StartsWith("__preview__", System.StringComparison.OrdinalIgnoreCase)) continue;
-                resolvedMissedSlapUpBlockReactionClip = clip;
-                usedPath = reactionFbxPath;
-                break;
-            }
-        }
-        if (playMissedRightBlockReaction && resolvedMissedSlapUpBlockReactionClip == null)
-        {
-            Debug.LogWarning($"[SlapCombat] Missed-slapup-block reaction clip not found in '{reactionFbxPath}'.");
-        }
-        else if (playMissedRightBlockReaction)
-        {
-            LogCombat($"[SlapCombat] Missed-slapup-block reaction ready from '{usedPath}', clip='{resolvedMissedSlapUpBlockReactionClip.name}'.");
+            const string reactionFbxPath = "Assets/Animation/Animations+/AKIROmodel@Dying 1.fbx";
+            resolvedMissedSlapUpBlockReactionClip = LoadFirstClipAtPathEditor(reactionFbxPath);
         }
 #endif
+        if (playMissedRightBlockReaction && resolvedMissedSlapUpBlockReactionClip == null)
+        {
+            Debug.LogWarning("[SlapCombat] Missed-slapup-block reaction clip is not resolved for runtime/build.");
+        }
     }
 
     private void ResolveMissedSlapErcutBlockReactionClip()
     {
-        resolvedMissedSlapErcutBlockReactionClip = null;
+        resolvedMissedSlapErcutBlockReactionClip = missedSlapErcutBlockReactionClip;
+        if (resolvedMissedSlapErcutBlockReactionClip == null)
+        {
+            resolvedMissedSlapErcutBlockReactionClip = FindRuntimeClipByNames(missedSlapErcutBlockReactionName, "Dyingslapercut");
+        }
 #if UNITY_EDITOR
-        const string reactionFbxPath = "Assets/Animation/Animations+/AKIROmodel@Dyingslapercut.fbx";
-        string usedPath = null;
-        var assets = AssetDatabase.LoadAllAssetsAtPath(reactionFbxPath);
-        if (assets != null)
+        if (resolvedMissedSlapErcutBlockReactionClip == null)
         {
-            foreach (var obj in assets)
-            {
-                var clip = obj as AnimationClip;
-                if (clip == null) continue;
-                if (clip.name.StartsWith("__preview__", System.StringComparison.OrdinalIgnoreCase)) continue;
-                resolvedMissedSlapErcutBlockReactionClip = clip;
-                usedPath = reactionFbxPath;
-                break;
-            }
-        }
-        if (playMissedRightBlockReaction && resolvedMissedSlapErcutBlockReactionClip == null)
-        {
-            Debug.LogWarning($"[SlapCombat] Missed-slapercut-block reaction clip not found in '{reactionFbxPath}'.");
-        }
-        else if (playMissedRightBlockReaction)
-        {
-            LogCombat($"[SlapCombat] Missed-slapercut-block reaction ready from '{usedPath}', clip='{resolvedMissedSlapErcutBlockReactionClip.name}'.");
+            const string reactionFbxPath = "Assets/Animation/Animations+/AKIROmodel@Dyingslapercut.fbx";
+            resolvedMissedSlapErcutBlockReactionClip = LoadFirstClipAtPathEditor(reactionFbxPath);
         }
 #endif
+        if (playMissedRightBlockReaction && resolvedMissedSlapErcutBlockReactionClip == null)
+        {
+            Debug.LogWarning("[SlapCombat] Missed-slapercut-block reaction clip is not resolved for runtime/build.");
+        }
     }
+
+    private static AnimationClip FindRuntimeClipByNames(params string[] names)
+    {
+        if (names == null || names.Length == 0) return null;
+        var loaded = Resources.FindObjectsOfTypeAll<AnimationClip>();
+        if (loaded == null || loaded.Length == 0) return null;
+
+        for (int n = 0; n < names.Length; n++)
+        {
+            string expected = names[n];
+            if (string.IsNullOrWhiteSpace(expected)) continue;
+            for (int i = 0; i < loaded.Length; i++)
+            {
+                var clip = loaded[i];
+                if (clip == null) continue;
+                if (clip.name.StartsWith("__preview__", System.StringComparison.OrdinalIgnoreCase)) continue;
+                if (string.Equals(clip.name, expected, System.StringComparison.OrdinalIgnoreCase))
+                {
+                    return clip;
+                }
+            }
+        }
+        return null;
+    }
+
+#if UNITY_EDITOR
+    private static AnimationClip LoadFirstClipAtPathEditor(string fbxPath)
+    {
+        if (string.IsNullOrWhiteSpace(fbxPath)) return null;
+        var assets = AssetDatabase.LoadAllAssetsAtPath(fbxPath);
+        if (assets == null) return null;
+        for (int i = 0; i < assets.Length; i++)
+        {
+            var clip = assets[i] as AnimationClip;
+            if (clip == null) continue;
+            if (clip.name.StartsWith("__preview__", System.StringComparison.OrdinalIgnoreCase)) continue;
+            return clip;
+        }
+        return null;
+    }
+#endif
 
     private void LogCombat(string message)
     {
@@ -1982,6 +2151,11 @@ public class SlapCombatManager : MonoBehaviour
     private void StartBattle()
     {
         if (battleStarted) return;
+        if (!EnsureCombatantsReadyForBattleStart())
+        {
+            battleStarted = false;
+            return;
+        }
         if (playerStats != null) playerStats.ResetToFull();
         if (aiStats != null) aiStats.ResetToFull();
 
@@ -2007,6 +2181,248 @@ public class SlapCombatManager : MonoBehaviour
             player.allowHumanInput = true;
         }
         ApplyTurnRoles();
+    }
+
+    private bool EnsureCombatantsReadyForBattleStart()
+    {
+        if (player == null || ai == null)
+        {
+            FindActors();
+        }
+        if (player != null && ai != null)
+        {
+            bool playerReady = EnsureCombatAnimatorReady(player, playerName);
+            bool aiReady = EnsureCombatAnimatorReady(ai, aiName);
+            if (playerReady && aiReady) return true;
+        }
+
+        TryRecoverCombatantByName(playerName, false);
+        TryRecoverCombatantByName(aiName, true);
+        FindActors();
+
+        if (player != null && ai != null)
+        {
+            bool playerReady = EnsureCombatAnimatorReady(player, playerName);
+            bool aiReady = EnsureCombatAnimatorReady(ai, aiName);
+            if (playerReady && aiReady) return true;
+        }
+
+        Debug.LogWarning("[SlapCombat] Battle start blocked: failed to recover both fighters. Expected objects named 'idle' and 'idle (1)'.");
+        return false;
+    }
+
+    private void TryRecoverCombatantByName(string actorName, bool attachAiController)
+    {
+        if (string.IsNullOrWhiteSpace(actorName)) return;
+
+        Transform actorTransform = FindTransformByExactName(actorName);
+        if (actorTransform == null) return;
+
+        var actorObject = actorTransform.gameObject;
+        var animator = actorObject.GetComponent<Animator>();
+        if (animator == null)
+        {
+            animator = actorObject.GetComponentInChildren<Animator>(true);
+        }
+        if (animator == null) return;
+
+        if (animator.runtimeAnimatorController == null)
+        {
+            var fallbackController = FindFallbackAnimatorController();
+            if (fallbackController != null)
+            {
+                animator.runtimeAnimatorController = fallbackController;
+            }
+        }
+        if (!AnimatorHasCombatStates(animator))
+        {
+            var fallbackController = FindFallbackAnimatorController();
+            if (fallbackController != null)
+            {
+                animator.runtimeAnimatorController = fallbackController;
+                animator.Rebind();
+                animator.Update(0f);
+            }
+        }
+        if (!AnimatorHasCombatStates(animator))
+        {
+            Debug.LogWarning($"[SlapCombat] '{actorName}' animator is not combat-ready. Controller='{(animator.runtimeAnimatorController != null ? animator.runtimeAnimatorController.name : "<null>")}'.");
+            return;
+        }
+
+        if (actorObject.GetComponent<SlapMechanics>() == null)
+        {
+            actorObject.AddComponent<SlapMechanics>();
+        }
+        if (actorObject.GetComponent<CombatantStats>() == null)
+        {
+            actorObject.AddComponent<CombatantStats>();
+        }
+        if (attachAiController && actorObject.GetComponent<SlapAIController>() == null)
+        {
+            actorObject.AddComponent<SlapAIController>();
+        }
+    }
+
+    private static RuntimeAnimatorController FindFallbackAnimatorController()
+    {
+        var seen = new System.Collections.Generic.HashSet<int>();
+        var candidates = new System.Collections.Generic.List<RuntimeAnimatorController>();
+
+        void AddCandidate(RuntimeAnimatorController c)
+        {
+            if (c == null) return;
+            int id = c.GetInstanceID();
+            if (!seen.Add(id)) return;
+            candidates.Add(c);
+        }
+
+        var animators = FindObjectsOfType<Animator>(true);
+        for (int i = 0; i < animators.Length; i++)
+        {
+            var controller = animators[i] != null ? animators[i].runtimeAnimatorController : null;
+            AddCandidate(controller);
+        }
+
+        var allControllers = Resources.FindObjectsOfTypeAll<RuntimeAnimatorController>();
+        for (int i = 0; i < allControllers.Length; i++)
+        {
+            AddCandidate(allControllers[i]);
+        }
+
+        RuntimeAnimatorController best = null;
+        int bestScore = int.MinValue;
+        for (int i = 0; i < candidates.Count; i++)
+        {
+            var c = candidates[i];
+            int score = ScoreController(c);
+            if (score > bestScore)
+            {
+                bestScore = score;
+                best = c;
+            }
+        }
+
+        if (bestScore <= 0) return null;
+        return best;
+    }
+
+    private bool EnsureCombatAnimatorReady(SlapMechanics mechanics, string actorName)
+    {
+        if (mechanics == null) return false;
+
+        var go = mechanics.gameObject;
+        var animator = go.GetComponent<Animator>();
+        if (animator == null)
+        {
+            animator = go.GetComponentInChildren<Animator>(true);
+        }
+        if (animator == null) return false;
+
+        if (AnimatorHasCombatStates(animator)) return true;
+
+        var fallback = FindFallbackAnimatorController();
+        if (fallback != null)
+        {
+            animator.runtimeAnimatorController = fallback;
+            animator.Rebind();
+            animator.Update(0f);
+        }
+
+        bool ready = AnimatorHasCombatStates(animator);
+        if (!ready)
+        {
+            Debug.LogWarning($"[SlapCombat] '{actorName}' has animator but no usable combat states. Controller='{(animator.runtimeAnimatorController != null ? animator.runtimeAnimatorController.name : "<null>")}'.");
+        }
+        return ready;
+    }
+
+    private static bool AnimatorHasCombatStates(Animator animator)
+    {
+        if (animator == null) return false;
+        if (animator.runtimeAnimatorController == null) return false;
+
+        int matched = 0;
+        for (int i = 0; i < RequiredCombatStateNames.Length; i++)
+        {
+            string stateName = RequiredCombatStateNames[i];
+            if (string.IsNullOrEmpty(stateName)) continue;
+            if (animator.HasState(0, Animator.StringToHash(stateName)))
+            {
+                matched++;
+            }
+        }
+
+        return matched >= 3;
+    }
+
+    private static int ScoreController(RuntimeAnimatorController controller)
+    {
+        if (controller == null) return int.MinValue;
+
+        int score = 0;
+        string controllerName = controller.name ?? string.Empty;
+        if (controllerName.Equals("Akiro", System.StringComparison.OrdinalIgnoreCase)) score += 500;
+        if (controllerName.ToLowerInvariant().Contains("akiro")) score += 200;
+
+        var clips = controller.animationClips;
+        if (clips != null)
+        {
+            for (int i = 0; i < clips.Length; i++)
+            {
+                var clip = clips[i];
+                if (clip == null) continue;
+                string clipName = clip.name ?? string.Empty;
+                for (int s = 0; s < CombatSignatureClipNames.Length; s++)
+                {
+                    if (clipName.Equals(CombatSignatureClipNames[s], System.StringComparison.OrdinalIgnoreCase))
+                    {
+                        score += 60;
+                        break;
+                    }
+                }
+            }
+        }
+
+        if (score == 0 && clips != null && clips.Length > 0)
+        {
+            score = 1;
+        }
+
+        return score;
+    }
+
+    private void RestartBattle()
+    {
+        if (player != null)
+        {
+            player.allowHumanInput = false;
+            player.AI_CancelWindup();
+            player.AI_EndBlock();
+        }
+        if (ai != null)
+        {
+            ai.AI_CancelWindup();
+            ai.AI_EndBlock();
+        }
+
+        gameOver = false;
+        pendingHit = false;
+        pendingHitAttacker = null;
+        pendingHitDefender = null;
+        pendingWindup01 = 0f;
+        pendingSlapPower01 = 0f;
+        pendingFirstStrictBlockProgress01 = -1f;
+        pendingHitDir = SlapMechanics.SlapDirection.None;
+        pendingBlockedDir = SlapMechanics.SlapDirection.None;
+        pendingTurnSwitch = false;
+        pendingAttacker = null;
+        pendingFlip = false;
+        perfectTimer = 0f;
+        hitMessage = null;
+        hitMessageTimer = 0f;
+        aiAttackDelayTimer = 0f;
+        battleStarted = false;
     }
 
     public SlapMechanics GetPlayer()

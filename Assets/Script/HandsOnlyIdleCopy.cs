@@ -92,6 +92,8 @@ public class HandsOnlyIdleCopy : MonoBehaviour
     private Dictionary<Transform, Transform> sourceToPoseBone;
     private List<Transform> poseSyncSource;
     private List<Transform> poseSyncTarget;
+    private bool pendingBuild;
+    private bool pendingForceBuild;
 
     private enum HandZone
     {
@@ -103,34 +105,47 @@ public class HandsOnlyIdleCopy : MonoBehaviour
     private void OnEnable()
     {
         EnsureRuntimeObjects();
-        TryBuild(true);
+        RequestBuild(true);
+        if (Application.isPlaying)
+        {
+            ProcessPendingBuild();
+        }
     }
 
     private void Start()
     {
-        TryBuild(false);
+        RequestBuild(false);
+        if (Application.isPlaying)
+        {
+            ProcessPendingBuild();
+        }
     }
 
     private void OnValidate()
     {
         if (!isActiveAndEnabled) return;
         EnsureRuntimeObjects();
-        TryBuild(true);
+        RequestBuild(true);
     }
 
     private void OnDisable()
     {
+        pendingBuild = false;
+        pendingForceBuild = false;
         CleanupAvatarMaterial();
     }
 
     private void OnDestroy()
     {
+        pendingBuild = false;
+        pendingForceBuild = false;
         CleanupAvatarMaterial();
     }
 
     private void LateUpdate()
     {
         EnsureRuntimeObjects();
+        ProcessPendingBuild();
 
         if (sourceRoot == null || sourceRenderer == null || poseRigRoot == null || (leftRenderer == null && rightRenderer == null))
         {
@@ -148,6 +163,22 @@ public class HandsOnlyIdleCopy : MonoBehaviour
         EnsureAvatarMaterialAssigned();
         UpdateDrivenHandVisibility();
         UpdateAvatarVisual();
+    }
+
+    private void RequestBuild(bool forceRebuild)
+    {
+        pendingBuild = true;
+        pendingForceBuild |= forceRebuild;
+    }
+
+    private void ProcessPendingBuild()
+    {
+        if (!pendingBuild) return;
+
+        bool forceRebuild = pendingForceBuild;
+        pendingBuild = false;
+        pendingForceBuild = false;
+        TryBuild(forceRebuild);
     }
 
     private void TryBuild(bool forceRebuild)
@@ -877,9 +908,17 @@ public class HandsOnlyIdleCopy : MonoBehaviour
                     bool reveal = progress > Mathf.Max(0f, movementRevealThreshold01);
                     if (reveal)
                     {
-                        var hand = sourceMechanics.GetControlledVisualHand();
-                        leftTarget = hand == SlapMechanics.VisualHand.Left;
-                        rightTarget = hand == SlapMechanics.VisualHand.Right;
+                        if (sourceMechanics.IsVerticalAttackVisualActive())
+                        {
+                            leftTarget = true;
+                            rightTarget = true;
+                        }
+                        else
+                        {
+                            var hand = sourceMechanics.GetControlledVisualHand();
+                            leftTarget = hand == SlapMechanics.VisualHand.Left;
+                            rightTarget = hand == SlapMechanics.VisualHand.Right;
+                        }
                     }
                 }
             }

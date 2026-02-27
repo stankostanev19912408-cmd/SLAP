@@ -79,6 +79,7 @@ public class SlapAIController : MonoBehaviour
         public GameDifficulty difficulty;
         public float aiDifficultyTelemetry01;
         public float minWindupDuration;
+        public float windupDurationMultiplier;
         public float minPostHold;
         public float attackCooldownAdd;
         public float swipeSpeedMultiplier;
@@ -1961,10 +1962,11 @@ public class SlapAIController : MonoBehaviour
             {
                 difficulty = GameDifficulty.Easy,
                 aiDifficultyTelemetry01 = 0.25f,
-                minWindupDuration = 1.10f,
-                minPostHold = 0.20f,
+                minWindupDuration = 1.35f,
+                windupDurationMultiplier = 1.35f,
+                minPostHold = 0.25f,
                 attackCooldownAdd = 0.25f,
-                swipeSpeedMultiplier = 0.80f,
+                swipeSpeedMultiplier = 0.70f,
                 explorationProb = 0.45f,
                 greedyProbMultiplier = 0.50f,
                 tunedReactToWindupFrom01 = 0.67f,
@@ -1980,9 +1982,10 @@ public class SlapAIController : MonoBehaviour
                 difficulty = GameDifficulty.Hard,
                 aiDifficultyTelemetry01 = 0.75f,
                 minWindupDuration = 0.65f,
+                windupDurationMultiplier = 1.25f,
                 minPostHold = 0.10f,
                 attackCooldownAdd = -0.10f,
-                swipeSpeedMultiplier = 1.10f,
+                swipeSpeedMultiplier = 0.95f,
                 explorationProb = 0.15f,
                 greedyProbMultiplier = 1.25f,
                 tunedReactToWindupFrom01 = 0.55f,
@@ -1997,10 +2000,11 @@ public class SlapAIController : MonoBehaviour
             {
                 difficulty = GameDifficulty.Normal,
                 aiDifficultyTelemetry01 = 0.50f,
-                minWindupDuration = 0.85f,
-                minPostHold = 0.15f,
+                minWindupDuration = 1.00f,
+                windupDurationMultiplier = 1.15f,
+                minPostHold = 0.18f,
                 attackCooldownAdd = 0.00f,
-                swipeSpeedMultiplier = 1.00f,
+                swipeSpeedMultiplier = 0.85f,
                 explorationProb = 0.30f,
                 greedyProbMultiplier = 1.00f,
                 tunedReactToWindupFrom01 = 0.61f,
@@ -2068,6 +2072,10 @@ public class SlapAIController : MonoBehaviour
         float durationMultiplier = Mathf.Lerp(0.65f, 0.42f, d);
         float targetScale = Mathf.Clamp(target01, 0.85f, 1f);
         float duration = Mathf.Max(0.12f, baseDuration * durationMultiplier * targetScale);
+        float profileWindupDurationMultiplier = hasDifficultyProfile
+            ? Mathf.Max(0.01f, currentProfile.windupDurationMultiplier)
+            : 1f;
+        duration *= profileWindupDurationMultiplier;
         float minWindupDuration = ResolveMinWindupDurationSeconds();
         bool floorApplied = duration < minWindupDuration;
         duration = Mathf.Max(duration, minWindupDuration);

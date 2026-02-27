@@ -34,6 +34,14 @@ public class CombatantStats : MonoBehaviour
         return spent;
     }
 
+    public float RecoverStamina(float amount)
+    {
+        if (amount <= 0f) return 0f;
+        float previous = stamina;
+        stamina = Mathf.Min(maxStamina, stamina + amount);
+        return stamina - previous;
+    }
+
     public float TakeDamage(float amount)
     {
         if (amount <= 0f) return 0f;
