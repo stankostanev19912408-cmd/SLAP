@@ -74,6 +74,25 @@ public class SlapAIController : MonoBehaviour
         Blocking
     }
 
+    private struct AIDifficultyProfile
+    {
+        public GameDifficulty difficulty;
+        public float aiDifficultyTelemetry01;
+        public float minWindupDuration;
+        public float minPostHold;
+        public float attackCooldownAdd;
+        public float swipeSpeedMultiplier;
+        public float explorationProb;
+        public float greedyProbMultiplier;
+        public float tunedReactToWindupFrom01;
+        public float tunedBlockRaiseDelaySeconds;
+        public float tunedBlockMistakeChance;
+        public float tunedLatchHoldExtraSeconds;
+        public float calmBlockNoThreatCapSeconds;
+        public float hardBlockHoldCapSeconds;
+        public float calmBlockReleaseGraceSeconds;
+    }
+
     private State state = State.Idle;
     private float stateTimer;
     private float windupDuration;
@@ -123,13 +142,19 @@ public class SlapAIController : MonoBehaviour
     private readonly System.Collections.Generic.Queue<ExchangeSample> slowWindow = new System.Collections.Generic.Queue<ExchangeSample>(SlowSkillWindowSize);
     private readonly int[] playerAttackHist = new int[8];
     private readonly int[] playerBlockHist = new int[8];
-    // Step 4: AI difficulty follows player skill asymmetrically (fast up, slow down).
-    private const float DifficultyRiseFactor = 0.35f;
-    private const float DifficultyFallFactor = 0.12f;
+    private const int PlayerHoldRecentWindow = 10;
+    private readonly System.Collections.Generic.Queue<float> playerBlockHoldRecent = new System.Collections.Generic.Queue<float>(PlayerHoldRecentWindow);
+    private readonly System.Collections.Generic.Queue<float> playerWindupHoldRecent = new System.Collections.Generic.Queue<float>(PlayerHoldRecentWindow);
+    private float playerAvgBlockHoldSecondsLast10;
+    private float playerAvgWindupHoldSecondsLast10;
     private const float MinBlockMistakeChance = 0.03f;
     private const float GreedyVulnerabilityDurationSeconds = 0.6f;
-    private const float GreedyVulnerabilityMistakeMultiplier = 1.8f;
-    private const float GreedyVulnerabilityRaiseDelayBonusSeconds = 0.08f;
+    private const float CalmBlockReleaseGraceMinSeconds = 0.15f;
+    private const float CalmBlockReleaseGraceMaxSeconds = 0.25f;
+    private const float PostTargetHoldLowSkillSeconds = 0.35f;
+    private const float PostTargetHoldHighSkillSeconds = 0.12f;
+    private const float PostTargetHoldRandomMaxSeconds = 0.06f;
+    private const int WindupTelemetrySampleCap = 200;
     private float playerSkillFast = 0.5f;
     private float playerSkillSlow = 0.5f;
     private float playerSkill = 0.5f;
@@ -145,10 +170,27 @@ public class SlapAIController : MonoBehaviour
     private float tunedBlockMistakeChance = 0.12f;
     private float tunedLatchHoldExtraSeconds = 0.2f;
     private float greedyVulnerabilityUntilTime = -999f;
+    private bool lastMinWindupDurationApplied;
+    private bool lastMinPostHoldApplied;
+    private bool anyMinWindupDurationApplied;
+    private bool anyMinPostHoldApplied;
+    private float noThreatBlockSeconds;
+    private readonly System.Collections.Generic.List<float> aiWindupChargeSamples = new System.Collections.Generic.List<float>(WindupTelemetrySampleCap);
+    private readonly System.Collections.Generic.List<float> aiWindupPostHoldSamples = new System.Collections.Generic.List<float>(WindupTelemetrySampleCap);
+    private bool aiWindupTelemetryActive;
+    private float aiWindupChargeSecondsCurrent;
+    private float aiWindupPostHoldSecondsCurrent;
+    private bool aiWindupTargetReachedCurrent;
+    private float aiWindupStartTimeCurrent;
+    private float aiWindupTargetReachedTimeCurrent;
+    private bool forcedBlockReleaseSignal;
     private SlapMechanics.SlapDirection lastPlayerBlockDir = SlapMechanics.SlapDirection.None;
     private SlapMechanics.SlapDirection lastExpectedBlockSourceDir = SlapMechanics.SlapDirection.None;
     private SlapMechanics.SlapDirection lastExpectedBlockResolvedDir = SlapMechanics.SlapDirection.None;
     private int playerSameBlockStreak;
+    private GameDifficulty currentDifficulty = GameDifficulty.Normal;
+    private AIDifficultyProfile currentProfile;
+    private bool hasDifficultyProfile;
     private static readonly SlapMechanics.SlapDirection[] AttackDirections =
     {
         SlapMechanics.SlapDirection.Up,
@@ -179,6 +221,7 @@ public class SlapAIController : MonoBehaviour
         slap = owner;
         startupTime = Time.time;
         SubscribeCombatEvents();
+        RefreshDifficultyProfileFromSettings(true);
         ResetAdaptiveState();
         if (slap != null)
         {
@@ -188,11 +231,13 @@ public class SlapAIController : MonoBehaviour
 
     private void OnDisable()
     {
+        FinalizeAIWindupTelemetry();
         UnsubscribeCombatEvents();
     }
 
     private void OnDestroy()
     {
+        FinalizeAIWindupTelemetry();
         UnsubscribeCombatEvents();
     }
 
@@ -202,9 +247,14 @@ public class SlapAIController : MonoBehaviour
         if (combat.GetAI() != slap) return;
         if (!combat.IsBattleStarted())
         {
+            RefreshDifficultyProfileFromSettings();
+        }
+        if (!combat.IsBattleStarted())
+        {
             if (state != State.Idle)
             {
                 slap.AI_SoftCancelWindup();
+                FinalizeAIWindupTelemetry();
                 slap.AI_SetHardBlockLock(false, SlapMechanics.SlapDirection.None);
                 slap.AI_EndBlock();
                 state = State.Idle;
@@ -212,7 +262,12 @@ public class SlapAIController : MonoBehaviour
             }
             return;
         }
-        RecomputeDefenseTuning(aiDifficulty);
+        RecomputeDefenseTuning();
+        UpdateAIWindupTelemetry();
+        if (aiWindupTelemetryActive && !attackInProgress)
+        {
+            FinalizeAIWindupTelemetry();
+        }
         if (combat.IsWaitingForSlapEnd())
         {
             // During unresolved slap, freeze actions.
@@ -221,6 +276,7 @@ public class SlapAIController : MonoBehaviour
                 if (state != State.Idle)
                 {
                     slap.AI_SoftCancelWindup();
+                    FinalizeAIWindupTelemetry();
                     state = State.Idle;
                     stateTimer = 0f;
                 }
@@ -258,6 +314,7 @@ public class SlapAIController : MonoBehaviour
                 if (state != State.Idle)
                 {
                     slap.AI_CancelWindup();
+                    FinalizeAIWindupTelemetry();
                     state = State.Idle;
                     stateTimer = 0f;
                 }
@@ -292,6 +349,7 @@ public class SlapAIController : MonoBehaviour
             if (state != State.Blocking && state != State.Idle)
             {
                 slap.AI_SoftCancelWindup();
+                FinalizeAIWindupTelemetry();
                 state = State.Idle;
                 stateTimer = 0f;
             }
@@ -385,6 +443,43 @@ public class SlapAIController : MonoBehaviour
             lastImmediateThreatTime = Time.time;
         }
 
+        bool noRealThreat =
+            !immediateThreat &&
+            !pendingThreatRaw &&
+            !attackCycleThreat &&
+            !slapThreat &&
+            !unresolvedHit;
+        bool isBlockingNow = state == State.Blocking || (slap != null && slap.IsDefenderBlocking());
+        if (isBlockingNow && noRealThreat)
+        {
+            noThreatBlockSeconds += Time.deltaTime;
+        }
+        else
+        {
+            noThreatBlockSeconds = 0f;
+        }
+
+        float calmCap = hasDifficultyProfile
+            ? Mathf.Max(0.05f, currentProfile.calmBlockNoThreatCapSeconds)
+            : 0.26f;
+        if (isBlockingNow && noThreatBlockSeconds > calmCap)
+        {
+            ForceReleaseBlockForEconomyCap();
+            return;
+        }
+
+        float hardCap = hasDifficultyProfile
+            ? Mathf.Max(0.1f, currentProfile.hardBlockHoldCapSeconds)
+            : 0.92f;
+        float currentBlockHoldSeconds = (slap != null && isBlockingNow)
+            ? Mathf.Max(0f, slap.GetDefenderBlockHoldSeconds())
+            : 0f;
+        if (isBlockingNow && currentBlockHoldSeconds > hardCap)
+        {
+            ForceReleaseBlockForEconomyCap();
+            return;
+        }
+
         // If block is already releasing and there is no real active threat,
         // never re-grab it from tail memory.
         if (slap != null && slap.IsDefenderBlockReleasing() && !immediateThreat && !unresolvedHit)
@@ -451,8 +546,23 @@ public class SlapAIController : MonoBehaviour
             slap.AI_SetHardBlockLock(false, SlapMechanics.SlapDirection.None);
             if (state == State.Blocking || slap.IsDefenderBlocking())
             {
+                float calmThreshold = Mathf.Max(0f, blockCalmReleaseDelaySeconds);
+                bool noThreatAndNoPending =
+                    !unresolvedHit &&
+                    !immediateThreat &&
+                    !slapThreat &&
+                    !attackCycleThreat &&
+                    !pendingThreatRaw &&
+                    !threatBlockLatched &&
+                    Time.time >= blockCommitUntilTime &&
+                    Time.time >= blockHardLatchUntilTime;
+                if (noThreatAndNoPending)
+                {
+                    calmThreshold = ResolveCalmBlockReleaseGraceSeconds();
+                }
+
                 bool calmReady = calmNoThreatSinceTime >= 0f &&
-                                 (Time.time - calmNoThreatSinceTime) >= Mathf.Max(0f, blockCalmReleaseDelaySeconds);
+                                 (Time.time - calmNoThreatSinceTime) >= calmThreshold;
                 if (!calmReady)
                 {
                     return;
@@ -469,6 +579,7 @@ public class SlapAIController : MonoBehaviour
 
     private void UpdateAttack()
     {
+        UpdateAIWindupTelemetry();
         switch (state)
         {
             case State.Idle:
@@ -501,6 +612,7 @@ public class SlapAIController : MonoBehaviour
                     state = State.Cooldown;
                     stateTimer = 0f;
                     attackInProgress = false;
+                    FinalizeAIWindupTelemetry();
                 }
                 break;
             case State.Cooldown:
@@ -520,6 +632,7 @@ public class SlapAIController : MonoBehaviour
             state = State.Cooldown;
             stateTimer = 0f;
             attackInProgress = false;
+            FinalizeAIWindupTelemetry();
         }
     }
 
@@ -597,26 +710,28 @@ public class SlapAIController : MonoBehaviour
 
         attackDir = ChooseAdaptiveAttackDirection();
         falseWindup = Random.value < fakeWindupChance;
-        windupDuration = Random.Range(windupDurationRange.x, windupDurationRange.y);
-        windupHold = Random.Range(windupHoldRange.x, windupHoldRange.y);
+        windupTarget = ResolveWindupTarget01();
+        windupDuration = ResolveWindupDurationSeconds(windupTarget);
+        windupHold = ResolvePostTargetHoldSeconds();
         // Do not keep hand in windup longer than 2 seconds total.
         float maxTotal = 2f;
         float maxHold = Mathf.Max(0f, maxTotal - windupDuration);
         if (windupHold > maxHold) windupHold = maxHold;
-        windupTarget = 1f;
-        swipeSpeed = GetAISwipeSpeedCmPerSec(aiDifficulty);
+        swipeSpeed = GetAISwipeSpeedCmPerSec();
         aiSwipeSpeedLast = swipeSpeed;
-        attackCooldown = Random.Range(attackCooldownRange.x, attackCooldownRange.y);
+        attackCooldown = ResolveAttackCooldownSeconds(Random.Range(attackCooldownRange.x, attackCooldownRange.y));
 
         slap.AI_BeginWindup(attackDir);
         state = State.Windup;
         stateTimer = 0f;
         attackStartTime = Time.time;
         attackInProgress = true;
+        BeginAIWindupTelemetry();
     }
 
     private void UpdateAttackMirrorMode()
     {
+        UpdateAIWindupTelemetry();
         switch (state)
         {
             case State.Idle:
@@ -641,6 +756,7 @@ public class SlapAIController : MonoBehaviour
                     state = State.Cooldown;
                     stateTimer = 0f;
                     attackInProgress = false;
+                    FinalizeAIWindupTelemetry();
                 }
                 break;
             case State.Cooldown:
@@ -660,6 +776,7 @@ public class SlapAIController : MonoBehaviour
             state = State.Cooldown;
             stateTimer = 0f;
             attackInProgress = false;
+            FinalizeAIWindupTelemetry();
         }
     }
 
@@ -667,18 +784,19 @@ public class SlapAIController : MonoBehaviour
     {
         attackDir = ChooseAdaptiveAttackDirection();
         falseWindup = false;
-        windupDuration = 0.95f;
-        windupHold = 0.06f;
-        windupTarget = 1f;
-        swipeSpeed = GetAISwipeSpeedCmPerSec(aiDifficulty);
+        windupTarget = ResolveWindupTarget01();
+        windupDuration = ResolveWindupDurationSeconds(windupTarget);
+        windupHold = ResolvePostTargetHoldSeconds();
+        swipeSpeed = GetAISwipeSpeedCmPerSec();
         aiSwipeSpeedLast = swipeSpeed;
-        attackCooldown = 0.3f;
+        attackCooldown = ResolveAttackCooldownSeconds(0.3f);
 
         slap.AI_BeginWindup(attackDir);
         state = State.Windup;
         stateTimer = 0f;
         attackStartTime = Time.time;
         attackInProgress = true;
+        BeginAIWindupTelemetry();
     }
 
     private void UpdateBlockMirrorMode()
@@ -920,6 +1038,11 @@ public class SlapAIController : MonoBehaviour
 
         if (threatBlockLatched && Time.time < threatBlockReleaseTime)
         {
+            if (opponent.GetPendingDirection() == SlapMechanics.SlapDirection.None)
+            {
+                float calmGrace = ResolveCalmBlockReleaseGraceSeconds();
+                threatBlockReleaseTime = Mathf.Min(threatBlockReleaseTime, Time.time + calmGrace);
+            }
             // Tail may keep an existing block, but must not re-raise from idle after a fake windup.
             if (state != State.Blocking)
             {
@@ -1034,6 +1157,33 @@ public class SlapAIController : MonoBehaviour
         lastExpectedBlockSourceDir = sourceExpected;
         lastExpectedBlockResolvedDir = resolved;
         return resolved;
+    }
+
+    private void ForceReleaseBlockForEconomyCap()
+    {
+        threatBlockLatched = false;
+        threatBlockReleaseTime = 0f;
+        blockCommitUntilTime = 0f;
+        blockHardLatchUntilTime = 0f;
+        blockLatchedUntilTime = 0f;
+        pendingThreatSinceTime = -1f;
+        pendingThreatStartTime = -1f;
+        lastPendingThreatRaw = false;
+        requirePendingResetAfterRelease = true;
+        blockReacquireLockUntilNeutral = true;
+        suppressPendingRaiseUntilTime = Time.time + Mathf.Max(0f, pendingReraiseSuppressSeconds);
+
+        if (slap != null)
+        {
+            slap.AI_SetHardBlockLock(false, SlapMechanics.SlapDirection.None);
+            slap.AI_EndBlock();
+        }
+        forcedBlockReleaseSignal = true;
+        blockReleasedAtTime = Time.time;
+        state = State.Idle;
+        stateTimer = 0f;
+        noThreatBlockSeconds = 0f;
+        calmNoThreatSinceTime = -1f;
     }
 
     private void ForceEndBlock(bool allowDuringIncomingThreat = false)
@@ -1155,13 +1305,18 @@ public class SlapAIController : MonoBehaviour
         if (recentPlayerSlapsCount < recentPlayerSlaps.Length) recentPlayerSlapsCount++;
     }
 
-    private SlapMechanics.SlapDirection ChooseAdaptiveAttackDirection(float playerSkill01, float aiDifficulty01)
+    private SlapMechanics.SlapDirection ChooseAdaptiveAttackDirection(float playerSkill01)
     {
         float ps = Mathf.Clamp01(playerSkill01);
-        float aiDiff = Mathf.Clamp01(aiDifficulty01);
         patternConfidence = GetPatternConfidence(playerSameBlockStreak);
-        float explorationProb = Mathf.Lerp(0.45f, 0.15f, aiDiff);
-        float greedyProb = Mathf.Clamp01((0.15f + 0.55f * patternConfidence) * (0.5f + 0.5f * ps));
+        float explorationProb = hasDifficultyProfile
+            ? Mathf.Clamp01(currentProfile.explorationProb)
+            : 0.30f;
+        float greedyBase = Mathf.Clamp01((0.15f + 0.55f * patternConfidence) * (0.5f + 0.5f * ps));
+        float greedyProbMultiplier = hasDifficultyProfile
+            ? Mathf.Max(0f, currentProfile.greedyProbMultiplier)
+            : 1f;
+        float greedyProb = Mathf.Clamp01(greedyBase * greedyProbMultiplier);
 
         lastExplorationProb = explorationProb;
         lastGreedyProb = greedyProb;
@@ -1195,7 +1350,7 @@ public class SlapAIController : MonoBehaviour
 
     private SlapMechanics.SlapDirection ChooseAdaptiveAttackDirection()
     {
-        return ChooseAdaptiveAttackDirection(playerSkill, aiDifficulty);
+        return ChooseAdaptiveAttackDirection(playerSkill);
     }
 
     private static float GetPatternConfidence(int streak)
@@ -1411,6 +1566,7 @@ public class SlapAIController : MonoBehaviour
             slap.AI_SetHardBlockLock(false, SlapMechanics.SlapDirection.None);
             slap.AI_EndBlock();
         }
+        FinalizeAIWindupTelemetry();
         state = State.Idle;
         stateTimer = 0f;
         attackInProgress = false;
@@ -1427,8 +1583,10 @@ public class SlapAIController : MonoBehaviour
         mistakeArmed = false;
         mistakeOpenUntilTime = 0f;
         blockHardLatchUntilTime = 0f;
+        noThreatBlockSeconds = 0f;
         threatBlockLatched = false;
         threatBlockReleaseTime = 0f;
+        forcedBlockReleaseSignal = false;
         lastImmediateThreatTime = -999f;
         pendingThreatSinceTime = -1f;
         blockReleasedAtTime = -999f;
@@ -1481,6 +1639,7 @@ public class SlapAIController : MonoBehaviour
         public float playerSkillSlow;
         public float playerSkill;
         public float aiDifficulty;
+        public string selectedDifficulty;
         public float patternConfidence;
         public int playerSameBlockStreak;
         public float aiSwipeSpeedLast;
@@ -1489,11 +1648,20 @@ public class SlapAIController : MonoBehaviour
         public string chosenAttackReason;
         public float explorationProb;
         public float greedyProb;
+        public float greedyProbMultiplier;
+        public float swipeSpeedMultiplier;
+        public float attackCooldownAdd;
         public float tunedReactToWindupFrom01;
         public float tunedBlockRaiseDelaySeconds;
         public float tunedBlockMistakeChance;
         public float tunedLatchHoldExtraSeconds;
         public float greedyVulnerabilityRemaining;
+        public float minWindupDuration;
+        public float minPostHold;
+        public bool minWindupDurationApplied;
+        public bool minPostHoldApplied;
+        public float playerAvgBlockHoldSecondsLast10;
+        public float playerAvgWindupHoldSecondsLast10;
         public string reason;
     }
 
@@ -1541,19 +1709,29 @@ public class SlapAIController : MonoBehaviour
             playerSkillSlow = Mathf.Clamp01(playerSkillSlow),
             playerSkill = Mathf.Clamp01(playerSkill),
             aiDifficulty = Mathf.Clamp01(aiDifficulty),
+            selectedDifficulty = GetCurrentDifficultyLabel(),
             patternConfidence = Mathf.Clamp01(patternConfidence),
             playerSameBlockStreak = Mathf.Max(0, playerSameBlockStreak),
             aiSwipeSpeedLast = lastSwipeSpeed,
             skillBand = GetSkillBand(),
             chosenAttackDir = chosenAttackDir.ToString(),
             chosenAttackReason = chosenAttackReason,
-            explorationProb = Mathf.Clamp01(lastExplorationProb),
+            explorationProb = hasDifficultyProfile ? Mathf.Clamp01(currentProfile.explorationProb) : Mathf.Clamp01(lastExplorationProb),
             greedyProb = Mathf.Clamp01(lastGreedyProb),
+            greedyProbMultiplier = hasDifficultyProfile ? Mathf.Max(0f, currentProfile.greedyProbMultiplier) : 1f,
+            swipeSpeedMultiplier = hasDifficultyProfile ? Mathf.Clamp(currentProfile.swipeSpeedMultiplier, 0.5f, 1.15f) : 1f,
+            attackCooldownAdd = hasDifficultyProfile ? currentProfile.attackCooldownAdd : 0f,
             tunedReactToWindupFrom01 = Mathf.Clamp01(tunedReactToWindupFrom01),
             tunedBlockRaiseDelaySeconds = Mathf.Max(0f, tunedBlockRaiseDelaySeconds),
             tunedBlockMistakeChance = Mathf.Clamp(tunedBlockMistakeChance, MinBlockMistakeChance, 1f),
             tunedLatchHoldExtraSeconds = Mathf.Max(0f, tunedLatchHoldExtraSeconds),
             greedyVulnerabilityRemaining = Mathf.Max(0f, greedyVulnerabilityUntilTime - Time.time),
+            minWindupDuration = ResolveMinWindupDurationSeconds(),
+            minPostHold = ResolveMinPostTargetHoldSeconds(),
+            minWindupDurationApplied = lastMinWindupDurationApplied,
+            minPostHoldApplied = lastMinPostHoldApplied,
+            playerAvgBlockHoldSecondsLast10 = Mathf.Max(0f, playerAvgBlockHoldSecondsLast10),
+            playerAvgWindupHoldSecondsLast10 = Mathf.Max(0f, playerAvgWindupHoldSecondsLast10),
             reason = BuildDecisionReason()
         };
 
@@ -1667,6 +1845,7 @@ public class SlapAIController : MonoBehaviour
         {
             playerAttackHist[dirIndex]++;
         }
+        PushRecentHoldSample(playerWindupHoldRecent, Mathf.Max(0f, data.windupHoldSeconds), PlayerHoldRecentWindow, out playerAvgWindupHoldSecondsLast10);
     }
 
     private void HandleHitResolvedForAdaptiveSkill(SlapCombatManager.HitResolvedEvent data)
@@ -1705,6 +1884,11 @@ public class SlapAIController : MonoBehaviour
                 lastPlayerBlockDir = playerResolvedBlockDir;
                 playerSameBlockStreak = 1;
             }
+            PushRecentHoldSample(
+                playerBlockHoldRecent,
+                Mathf.Max(0f, player.GetDefenderBlockHoldSeconds()),
+                PlayerHoldRecentWindow,
+                out playerAvgBlockHoldSecondsLast10);
         }
         else if (playerWasDefender)
         {
@@ -1743,34 +1927,356 @@ public class SlapAIController : MonoBehaviour
         playerSkillFast = CalculateWindowScore(fastWindow, playerSkillFast);
         playerSkillSlow = CalculateWindowScore(slowWindow, playerSkillSlow);
         playerSkill = Mathf.Clamp01(0.65f * playerSkillSlow + 0.35f * playerSkillFast);
-        UpdateAIDifficulty(playerSkill);
+        UpdateAIDifficulty();
     }
 
-    private void UpdateAIDifficulty(float targetSkill)
+    private void UpdateAIDifficulty()
     {
-        float target = Mathf.Clamp01(targetSkill);
-        float current = Mathf.Clamp01(aiDifficulty);
-        float factor = target > current ? DifficultyRiseFactor : DifficultyFallFactor;
-        aiDifficulty = Mathf.Clamp01(current + ((target - current) * factor));
+        aiDifficulty = hasDifficultyProfile
+            ? Mathf.Clamp01(currentProfile.aiDifficultyTelemetry01)
+            : 0.5f;
     }
 
-    private void RecomputeDefenseTuning(float difficulty01)
+    private void RefreshDifficultyProfileFromSettings(bool force = false)
     {
-        float d = Mathf.Clamp01(difficulty01);
-        tunedReactToWindupFrom01 = Mathf.Lerp(0.70f, 0.52f, d);
-        tunedBlockRaiseDelaySeconds = Mathf.Lerp(0.45f, 0.22f, d);
-        tunedBlockMistakeChance = Mathf.Max(MinBlockMistakeChance, Mathf.Lerp(0.22f, 0.05f, d));
-        tunedLatchHoldExtraSeconds = Mathf.Lerp(0.15f, 0.35f, d);
+        GameDifficulty selected = GameSettings.SelectedDifficulty;
+        if (!force && hasDifficultyProfile && selected == currentDifficulty) return;
+        ApplyDifficultyProfile(selected);
+    }
 
-        if (Time.time < greedyVulnerabilityUntilTime)
+    private void ApplyDifficultyProfile(GameDifficulty difficulty)
+    {
+        currentDifficulty = difficulty;
+        currentProfile = BuildDifficultyProfile(difficulty);
+        hasDifficultyProfile = true;
+        aiDifficulty = Mathf.Clamp01(currentProfile.aiDifficultyTelemetry01);
+        RecomputeDefenseTuning();
+    }
+
+    private static AIDifficultyProfile BuildDifficultyProfile(GameDifficulty difficulty)
+    {
+        return difficulty switch
         {
-            tunedBlockMistakeChance = Mathf.Clamp(tunedBlockMistakeChance * GreedyVulnerabilityMistakeMultiplier, MinBlockMistakeChance, 1f);
-            tunedBlockRaiseDelaySeconds = Mathf.Max(0f, tunedBlockRaiseDelaySeconds + GreedyVulnerabilityRaiseDelayBonusSeconds);
+            GameDifficulty.Easy => new AIDifficultyProfile
+            {
+                difficulty = GameDifficulty.Easy,
+                aiDifficultyTelemetry01 = 0.25f,
+                minWindupDuration = 1.10f,
+                minPostHold = 0.20f,
+                attackCooldownAdd = 0.25f,
+                swipeSpeedMultiplier = 0.80f,
+                explorationProb = 0.45f,
+                greedyProbMultiplier = 0.50f,
+                tunedReactToWindupFrom01 = 0.67f,
+                tunedBlockRaiseDelaySeconds = 0.43f,
+                tunedBlockMistakeChance = 0.21f,
+                tunedLatchHoldExtraSeconds = 0.16f,
+                calmBlockNoThreatCapSeconds = 0.35f,
+                hardBlockHoldCapSeconds = 1.10f,
+                calmBlockReleaseGraceSeconds = 0.25f
+            },
+            GameDifficulty.Hard => new AIDifficultyProfile
+            {
+                difficulty = GameDifficulty.Hard,
+                aiDifficultyTelemetry01 = 0.75f,
+                minWindupDuration = 0.65f,
+                minPostHold = 0.10f,
+                attackCooldownAdd = -0.10f,
+                swipeSpeedMultiplier = 1.10f,
+                explorationProb = 0.15f,
+                greedyProbMultiplier = 1.25f,
+                tunedReactToWindupFrom01 = 0.55f,
+                tunedBlockRaiseDelaySeconds = 0.24f,
+                tunedBlockMistakeChance = 0.06f,
+                tunedLatchHoldExtraSeconds = 0.24f,
+                calmBlockNoThreatCapSeconds = 0.20f,
+                hardBlockHoldCapSeconds = 0.78f,
+                calmBlockReleaseGraceSeconds = 0.16f
+            },
+            _ => new AIDifficultyProfile
+            {
+                difficulty = GameDifficulty.Normal,
+                aiDifficultyTelemetry01 = 0.50f,
+                minWindupDuration = 0.85f,
+                minPostHold = 0.15f,
+                attackCooldownAdd = 0.00f,
+                swipeSpeedMultiplier = 1.00f,
+                explorationProb = 0.30f,
+                greedyProbMultiplier = 1.00f,
+                tunedReactToWindupFrom01 = 0.61f,
+                tunedBlockRaiseDelaySeconds = 0.33f,
+                tunedBlockMistakeChance = 0.13f,
+                tunedLatchHoldExtraSeconds = 0.20f,
+                calmBlockNoThreatCapSeconds = 0.26f,
+                hardBlockHoldCapSeconds = 0.92f,
+                calmBlockReleaseGraceSeconds = 0.20f
+            }
+        };
+    }
+
+    private void RecomputeDefenseTuning()
+    {
+        if (!hasDifficultyProfile)
+        {
+            ApplyDifficultyProfile(GameDifficulty.Normal);
+        }
+
+        tunedReactToWindupFrom01 = Mathf.Clamp01(currentProfile.tunedReactToWindupFrom01);
+        tunedBlockRaiseDelaySeconds = Mathf.Max(0f, currentProfile.tunedBlockRaiseDelaySeconds);
+        tunedBlockMistakeChance = Mathf.Clamp(currentProfile.tunedBlockMistakeChance, MinBlockMistakeChance, 1f);
+        tunedLatchHoldExtraSeconds = Mathf.Max(0f, currentProfile.tunedLatchHoldExtraSeconds);
+    }
+
+    private float ResolvePostTargetHoldSeconds()
+    {
+        float profile01 = hasDifficultyProfile ? Mathf.Clamp01(currentProfile.aiDifficultyTelemetry01) : 0.5f;
+        float baseHold = Mathf.Lerp(PostTargetHoldLowSkillSeconds, PostTargetHoldHighSkillSeconds, profile01);
+        float minHold = Mathf.Max(0f, windupHoldRange.x);
+        float maxHold = Mathf.Max(minHold, Mathf.Max(windupHoldRange.y, baseHold));
+        float hold = Mathf.Max(0f, baseHold + Random.Range(0f, PostTargetHoldRandomMaxSeconds));
+        float minPostHold = ResolveMinPostTargetHoldSeconds();
+        bool floorApplied = hold < minPostHold;
+        hold = Mathf.Max(hold, minPostHold);
+        lastMinPostHoldApplied = floorApplied;
+        if (floorApplied)
+        {
+            anyMinPostHoldApplied = true;
+        }
+        return Mathf.Clamp(hold, minHold, maxHold + PostTargetHoldRandomMaxSeconds);
+    }
+
+    private float ResolveWindupTarget01()
+    {
+        float d = hasDifficultyProfile ? Mathf.Clamp01(currentProfile.aiDifficultyTelemetry01) : 0.5f;
+        if (d < 0.45f)
+        {
+            return 1f;
+        }
+
+        float midToHigh = Mathf.InverseLerp(0.45f, 1f, d);
+        float minTarget = Mathf.Lerp(0.95f, 0.85f, midToHigh);
+        float maxTarget = 1f;
+        return Mathf.Clamp01(Random.Range(minTarget, maxTarget));
+    }
+
+    private float ResolveWindupDurationSeconds(float target01)
+    {
+        float d = hasDifficultyProfile ? Mathf.Clamp01(currentProfile.aiDifficultyTelemetry01) : 0.5f;
+        float minDur = Mathf.Min(windupDurationRange.x, windupDurationRange.y);
+        float maxDur = Mathf.Max(windupDurationRange.x, windupDurationRange.y);
+        float baseDuration = Random.Range(minDur, maxDur);
+        float durationMultiplier = Mathf.Lerp(0.65f, 0.42f, d);
+        float targetScale = Mathf.Clamp(target01, 0.85f, 1f);
+        float duration = Mathf.Max(0.12f, baseDuration * durationMultiplier * targetScale);
+        float minWindupDuration = ResolveMinWindupDurationSeconds();
+        bool floorApplied = duration < minWindupDuration;
+        duration = Mathf.Max(duration, minWindupDuration);
+        if (IsAIExhaustedForAttackTempo())
+        {
+            duration += Random.Range(0.12f, 0.20f);
+        }
+        lastMinWindupDurationApplied = floorApplied;
+        if (floorApplied)
+        {
+            anyMinWindupDurationApplied = true;
+        }
+        return duration;
+    }
+
+    private float ResolveMinWindupDurationSeconds()
+    {
+        if (!hasDifficultyProfile) return 0.85f;
+        return Mathf.Max(0f, currentProfile.minWindupDuration);
+    }
+
+    private float ResolveMinPostTargetHoldSeconds()
+    {
+        if (!hasDifficultyProfile) return 0.15f;
+        return Mathf.Max(0f, currentProfile.minPostHold);
+    }
+
+    private float ResolveAttackCooldownSeconds(float rawCooldownSeconds)
+    {
+        float add = hasDifficultyProfile ? currentProfile.attackCooldownAdd : 0f;
+        float cooldownFloor = Mathf.Max(0.05f, Mathf.Min(attackCooldownRange.x, attackCooldownRange.y) + add);
+        float cooldown = Mathf.Max(0f, rawCooldownSeconds + add);
+        if (IsAIExhaustedForAttackTempo())
+        {
+            cooldownFloor = Mathf.Max(cooldownFloor, 0.55f);
+        }
+        return Mathf.Max(0f, Mathf.Max(cooldown, cooldownFloor));
+    }
+
+    private bool IsAIExhaustedForAttackTempo()
+    {
+        if (selfStats == null && slap != null)
+        {
+            selfStats = slap.GetComponent<CombatantStats>();
+        }
+        if (selfStats == null) return false;
+        return selfStats.Stamina <= 0f && selfStats.Health > 0f;
+    }
+
+    private float ResolveCalmBlockReleaseGraceSeconds()
+    {
+        if (!hasDifficultyProfile)
+        {
+            return 0.20f;
+        }
+        return Mathf.Clamp(
+            currentProfile.calmBlockReleaseGraceSeconds,
+            CalmBlockReleaseGraceMinSeconds,
+            CalmBlockReleaseGraceMaxSeconds);
+    }
+
+    private void BeginAIWindupTelemetry()
+    {
+        aiWindupTelemetryActive = true;
+        aiWindupStartTimeCurrent = -1f;
+        aiWindupTargetReachedCurrent = false;
+        aiWindupTargetReachedTimeCurrent = -1f;
+        aiWindupChargeSecondsCurrent = 0f;
+        aiWindupPostHoldSecondsCurrent = 0f;
+    }
+
+    private void UpdateAIWindupTelemetry()
+    {
+        if (!aiWindupTelemetryActive || slap == null) return;
+
+        float now = Time.time;
+        float target = Mathf.Clamp01(windupTarget);
+        float windup01 = Mathf.Clamp01(slap.GetDebugWindup01());
+        float reachThreshold = Mathf.Clamp01(target - 0.01f);
+
+        if (aiWindupStartTimeCurrent < 0f)
+        {
+            if (attackInProgress && windup01 > 0.02f)
+            {
+                aiWindupStartTimeCurrent = now;
+            }
+            else
+            {
+                return;
+            }
+        }
+
+        float start = aiWindupStartTimeCurrent;
+        float elapsed = Mathf.Max(0f, now - start);
+
+        if (!aiWindupTargetReachedCurrent && windup01 >= reachThreshold)
+        {
+            aiWindupTargetReachedCurrent = true;
+            aiWindupTargetReachedTimeCurrent = now;
+        }
+
+        if (aiWindupTargetReachedCurrent)
+        {
+            aiWindupChargeSecondsCurrent = Mathf.Max(0f, aiWindupTargetReachedTimeCurrent - start);
+            aiWindupPostHoldSecondsCurrent = Mathf.Max(0f, now - aiWindupTargetReachedTimeCurrent);
         }
         else
         {
-            tunedBlockMistakeChance = Mathf.Clamp(tunedBlockMistakeChance, MinBlockMistakeChance, 1f);
+            aiWindupChargeSecondsCurrent = elapsed;
+            aiWindupPostHoldSecondsCurrent = 0f;
         }
+    }
+
+    private void FinalizeAIWindupTelemetry()
+    {
+        if (!aiWindupTelemetryActive) return;
+        UpdateAIWindupTelemetry();
+        if (aiWindupStartTimeCurrent >= 0f)
+        {
+            AddCappedSample(aiWindupChargeSamples, aiWindupChargeSecondsCurrent);
+            AddCappedSample(aiWindupPostHoldSamples, aiWindupPostHoldSecondsCurrent);
+        }
+        aiWindupTelemetryActive = false;
+        aiWindupStartTimeCurrent = 0f;
+        aiWindupTargetReachedCurrent = false;
+        aiWindupTargetReachedTimeCurrent = 0f;
+        aiWindupChargeSecondsCurrent = 0f;
+        aiWindupPostHoldSecondsCurrent = 0f;
+    }
+
+    public bool ConsumeForcedBlockReleaseSignal()
+    {
+        if (!forcedBlockReleaseSignal) return false;
+        forcedBlockReleaseSignal = false;
+        return true;
+    }
+
+    private static void AddCappedSample(System.Collections.Generic.List<float> sink, float value)
+    {
+        if (sink == null) return;
+        float sample = Mathf.Max(0f, value);
+        sink.Add(sample);
+        if (sink.Count > WindupTelemetrySampleCap)
+        {
+            sink.RemoveAt(0);
+        }
+    }
+
+    private static float CalculateListAverage(System.Collections.Generic.List<float> samples, float? extraSample = null)
+    {
+        int count = samples != null ? samples.Count : 0;
+        if (extraSample.HasValue) count++;
+        if (count <= 0) return 0f;
+
+        float sum = 0f;
+        if (samples != null)
+        {
+            for (int i = 0; i < samples.Count; i++)
+            {
+                sum += Mathf.Max(0f, samples[i]);
+            }
+        }
+        if (extraSample.HasValue)
+        {
+            sum += Mathf.Max(0f, extraSample.Value);
+        }
+        return sum / count;
+    }
+
+    private static float CalculateListP90(System.Collections.Generic.List<float> samples, float? extraSample = null)
+    {
+        int baseCount = samples != null ? samples.Count : 0;
+        int totalCount = baseCount + (extraSample.HasValue ? 1 : 0);
+        if (totalCount <= 0) return 0f;
+
+        var copy = new System.Collections.Generic.List<float>(totalCount);
+        if (samples != null)
+        {
+            for (int i = 0; i < samples.Count; i++)
+            {
+                copy.Add(Mathf.Max(0f, samples[i]));
+            }
+        }
+        if (extraSample.HasValue)
+        {
+            copy.Add(Mathf.Max(0f, extraSample.Value));
+        }
+        copy.Sort();
+        int index = Mathf.Clamp(Mathf.FloorToInt(0.9f * (copy.Count - 1)), 0, copy.Count - 1);
+        return copy[index];
+    }
+
+    private static void PushRecentHoldSample(System.Collections.Generic.Queue<float> queue, float value, int maxSize, out float average)
+    {
+        average = 0f;
+        if (queue == null) return;
+        queue.Enqueue(Mathf.Max(0f, value));
+        while (queue.Count > Mathf.Max(1, maxSize))
+        {
+            queue.Dequeue();
+        }
+        if (queue.Count <= 0) return;
+
+        float sum = 0f;
+        foreach (float sample in queue)
+        {
+            sum += Mathf.Max(0f, sample);
+        }
+        average = sum / queue.Count;
     }
 
     private float CalculateWindowScore(System.Collections.Generic.Queue<ExchangeSample> window, float fallback)
@@ -1802,9 +2308,9 @@ public class SlapAIController : MonoBehaviour
         return 0f;
     }
 
-    private float GetAISwipeSpeedCmPerSec(float skill01)
+    private float GetAISwipeSpeedCmPerSec()
     {
-        float s = Mathf.Clamp01(skill01);
+        float s = 0.5f;
         float low = Mathf.Lerp(5f, 18f, s);
         float high = Mathf.Lerp(12f, 35f, s);
 
@@ -1841,19 +2347,29 @@ public class SlapAIController : MonoBehaviour
 
         low = Mathf.Max(0.01f, low);
         high = Mathf.Max(low + 0.01f, high);
-        return Random.Range(low, high);
+        float speed = Random.Range(low, high);
+        float multiplier = hasDifficultyProfile
+            ? Mathf.Clamp(currentProfile.swipeSpeedMultiplier, 0.5f, 1.15f)
+            : 1f;
+        speed *= multiplier;
+        return Mathf.Clamp(speed, 0.01f, 32f);
     }
 
     private void ResetAdaptiveState()
     {
+        RefreshDifficultyProfileFromSettings(true);
         fastWindow.Clear();
         slowWindow.Clear();
         System.Array.Clear(playerAttackHist, 0, playerAttackHist.Length);
         System.Array.Clear(playerBlockHist, 0, playerBlockHist.Length);
+        playerBlockHoldRecent.Clear();
+        playerWindupHoldRecent.Clear();
+        playerAvgBlockHoldSecondsLast10 = 0f;
+        playerAvgWindupHoldSecondsLast10 = 0f;
         playerSkillFast = 0.5f;
         playerSkillSlow = 0.5f;
         playerSkill = 0.5f;
-        aiDifficulty = 0.5f;
+        aiDifficulty = hasDifficultyProfile ? currentProfile.aiDifficultyTelemetry01 : 0.5f;
         patternConfidence = 0f;
         aiSwipeSpeedLast = 0f;
         chosenAttackDir = SlapMechanics.SlapDirection.None;
@@ -1865,8 +2381,91 @@ public class SlapAIController : MonoBehaviour
         lastExpectedBlockResolvedDir = SlapMechanics.SlapDirection.None;
         playerSameBlockStreak = 0;
         greedyVulnerabilityUntilTime = -999f;
-        RecomputeDefenseTuning(aiDifficulty);
+        lastMinWindupDurationApplied = false;
+        lastMinPostHoldApplied = false;
+        anyMinWindupDurationApplied = false;
+        anyMinPostHoldApplied = false;
+        RecomputeDefenseTuning();
         pendingThreatRaiseDelaySeconds = Mathf.Max(0f, tunedBlockRaiseDelaySeconds);
+        noThreatBlockSeconds = 0f;
+        aiWindupChargeSamples.Clear();
+        aiWindupPostHoldSamples.Clear();
+        aiWindupTelemetryActive = false;
+        aiWindupTargetReachedCurrent = false;
+        aiWindupStartTimeCurrent = 0f;
+        aiWindupTargetReachedTimeCurrent = 0f;
+        aiWindupChargeSecondsCurrent = 0f;
+        aiWindupPostHoldSecondsCurrent = 0f;
+        forcedBlockReleaseSignal = false;
+    }
+
+    public float GetAvgAIWindupChargeSeconds()
+    {
+        if (aiWindupTelemetryActive) UpdateAIWindupTelemetry();
+        return CalculateListAverage(aiWindupChargeSamples, aiWindupTelemetryActive ? aiWindupChargeSecondsCurrent : (float?)null);
+    }
+
+    public float GetP90AIWindupChargeSeconds()
+    {
+        if (aiWindupTelemetryActive) UpdateAIWindupTelemetry();
+        return CalculateListP90(aiWindupChargeSamples, aiWindupTelemetryActive ? aiWindupChargeSecondsCurrent : (float?)null);
+    }
+
+    public float GetAvgAIWindupPostHoldSeconds()
+    {
+        if (aiWindupTelemetryActive) UpdateAIWindupTelemetry();
+        return CalculateListAverage(aiWindupPostHoldSamples, aiWindupTelemetryActive ? aiWindupPostHoldSecondsCurrent : (float?)null);
+    }
+
+    public float GetP90AIWindupPostHoldSeconds()
+    {
+        if (aiWindupTelemetryActive) UpdateAIWindupTelemetry();
+        return CalculateListP90(aiWindupPostHoldSamples, aiWindupTelemetryActive ? aiWindupPostHoldSecondsCurrent : (float?)null);
+    }
+
+    public float GetMinWindupDurationSecondsForTelemetry()
+    {
+        return ResolveMinWindupDurationSeconds();
+    }
+
+    public float GetMinPostHoldSecondsForTelemetry()
+    {
+        return ResolveMinPostTargetHoldSeconds();
+    }
+
+    public string GetCurrentDifficultyLabel()
+    {
+        return currentDifficulty.ToString();
+    }
+
+    public float GetSwipeSpeedMultiplierForTelemetry()
+    {
+        return hasDifficultyProfile ? Mathf.Clamp(currentProfile.swipeSpeedMultiplier, 0.5f, 1.15f) : 1f;
+    }
+
+    public float GetExplorationProbForTelemetry()
+    {
+        return hasDifficultyProfile ? Mathf.Clamp01(currentProfile.explorationProb) : 0.30f;
+    }
+
+    public float GetGreedyProbMultiplierForTelemetry()
+    {
+        return hasDifficultyProfile ? Mathf.Max(0f, currentProfile.greedyProbMultiplier) : 1f;
+    }
+
+    public float GetAttackCooldownAddForTelemetry()
+    {
+        return hasDifficultyProfile ? currentProfile.attackCooldownAdd : 0f;
+    }
+
+    public bool GetMinWindupDurationAppliedAny()
+    {
+        return anyMinWindupDurationApplied;
+    }
+
+    public bool GetMinPostHoldAppliedAny()
+    {
+        return anyMinPostHoldApplied;
     }
 
     private string GetSkillBand()

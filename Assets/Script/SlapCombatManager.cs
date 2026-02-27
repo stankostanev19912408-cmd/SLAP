@@ -25,6 +25,12 @@ public class SlapCombatManager : MonoBehaviour
         public float attackerStaminaAfter;
         public float defenderHealthBefore;
         public float defenderHealthAfter;
+        public float attackStrength;
+        public float blockStrength;
+        public float effectiveBlockStrength;
+        public float stamina01;
+        public bool wasPerfect;
+        public bool blockDirMatched;
     }
 
     public struct StaminaDrainEvent
@@ -33,6 +39,7 @@ public class SlapCombatManager : MonoBehaviour
         public string reason;
         public float amount;
         public float ratePerSecond;
+        public float drainMultiplier;
         public float staminaBefore;
         public float staminaAfter;
     }
@@ -96,8 +103,6 @@ public class SlapCombatManager : MonoBehaviour
     [SerializeField, Range(0.5f, 0.98f)] private float legacyHitResolveProgress = 0.80f;
 
     [Header("Perfect Block")]
-    [SerializeField] private float perfectBlockMaxHoldSeconds = 1f;
-    [SerializeField] private float perfectBlockMinHold01 = 0.98f;
     [SerializeField] private float perfectTextSeconds = 0.8f;
     [Header("Debug")]
     [SerializeField] private bool verboseCombatLogs = false;
@@ -133,12 +138,17 @@ public class SlapCombatManager : MonoBehaviour
     private GUIStyle turnStyle;
     private GUIStyle hitStyle;
     private GUIStyle startButtonStyle;
+    private GUIStyle difficultyLabelStyle;
+    private GUIStyle difficultyButtonStyle;
+    private GUIStyle difficultyButtonSelectedStyle;
     private string hitMessage;
     private float hitMessageTimer;
     private bool pendingHit;
     private SlapMechanics pendingHitAttacker;
     private SlapMechanics pendingHitDefender;
-    private float pendingDamagePercent;
+    private float pendingWindup01;
+    private float pendingSlapPower01;
+    private float pendingFirstStrictBlockProgress01;
     private SlapMechanics.SlapDirection pendingHitDir;
     private SlapMechanics.SlapDirection pendingBlockedDir;
     private static Texture2D whiteTex;
@@ -173,6 +183,9 @@ public class SlapCombatManager : MonoBehaviour
     private Transform playerRightProxyVisual;
     private Transform opponentLeftProxyVisual;
     private Transform opponentRightProxyVisual;
+    private const float StrengthMaxPerComponent = 50f;
+    private const float AttackStrengthMax = 100f;
+    private const float PerfectBlockProgressThreshold01 = 0.85f;
 
     public static void EnsureExists()
     {
@@ -215,23 +228,14 @@ public class SlapCombatManager : MonoBehaviour
         ResolveMissedSlapUpBlockReactionClip();
         ResolveMissedSlapErcutBlockReactionClip();
         FindActors();
-        bool shouldRequireTap = requireTapToStart;
-#if UNITY_EDITOR || DEVELOPMENT_BUILD
-        if (autoStartBattleInDebug)
+        // Always show start UI before combat so player can pick difficulty first.
+        // Legacy autostart flags are intentionally ignored for battle start gating.
+        if (!requireTapToStart || autoStartBattleInDebug)
         {
-            shouldRequireTap = false;
+            // Intentionally no-op: combat still starts only via Start button.
         }
-#endif
-
-        if (!shouldRequireTap)
-        {
-            StartBattle();
-        }
-        else
-        {
-            battleStarted = false;
-            if (player != null) player.allowHumanInput = false;
-        }
+        battleStarted = false;
+        if (player != null) player.allowHumanInput = false;
         lastAppliedAdvancedAIEnabled = advancedAIEnabled;
         EnsureHandsCopyHierarchyOnly();
     }
@@ -344,9 +348,16 @@ public class SlapCombatManager : MonoBehaviour
         }
         if (pendingHit)
         {
-            if (pendingHitDefender != null && pendingHitDefender.IsDefenderBlocking())
+            if (pendingHitDefender != null)
             {
                 pendingBlockedDir = pendingHitDefender.GetCurrentBlockDirection();
+                if (pendingFirstStrictBlockProgress01 < 0f &&
+                    pendingHitAttacker != null &&
+                    pendingHitDefender.GetDefenderBlockHold01() > 0.001f &&
+                    IsStrictBlockDirectionMatched(pendingHitDefender, pendingHitDir))
+                {
+                    pendingFirstStrictBlockProgress01 = Mathf.Clamp01(pendingHitAttacker.GetSlapProgress01());
+                }
             }
             ResolvePendingHit();
         }
@@ -375,33 +386,31 @@ public class SlapCombatManager : MonoBehaviour
 
         float windup01 = Mathf.Clamp01(data.windup01);
         float slapPower01 = Mathf.Clamp01(data.slapPower01);
-        float baseDamagePercent = (windup01 + slapPower01) * damagePercentScale;
         pendingHit = true;
         pendingHitAttacker = attacker;
         pendingHitDefender = defender;
-        pendingDamagePercent = baseDamagePercent;
+        pendingWindup01 = windup01;
+        pendingSlapPower01 = slapPower01;
+        pendingFirstStrictBlockProgress01 = -1f;
         pendingHitDir = data.direction;
         pendingBlockedDir = SlapMechanics.SlapDirection.None;
 
         if (gameOver) return;
     }
 
-    private bool IsPerfectBlock(SlapMechanics def, SlapMechanics.SlapDirection attackDir)
+    private bool IsStrictBlockDirectionMatched(SlapMechanics def, SlapMechanics.SlapDirection attackDir)
     {
         if (def == null) return false;
         if (attackDir == SlapMechanics.SlapDirection.None) return false;
         if (def.GetCurrentBlockDirection() != MirrorForOpponent(attackDir)) return false;
-        if (def.GetDefenderBlockHold01() < perfectBlockMinHold01) return false;
-        if (def.GetDefenderBlockHoldSeconds() > perfectBlockMaxHoldSeconds) return false;
         return true;
     }
 
-    private bool IsBlock(SlapMechanics def, SlapMechanics.SlapDirection attackDir)
+    private bool IsPerfectBlock(bool blockDirMatched)
     {
-        if (def == null) return false;
-        if (attackDir == SlapMechanics.SlapDirection.None) return false;
-        if (def.GetCurrentBlockDirection() != MirrorForOpponent(attackDir)) return false;
-        return def.IsDefenderBlocking();
+        if (!blockDirMatched) return false;
+        if (pendingFirstStrictBlockProgress01 < 0f) return false;
+        return pendingFirstStrictBlockProgress01 >= PerfectBlockProgressThreshold01;
     }
 
     private void SetHitMessage(SlapMechanics attacker, SlapMechanics defender, bool blocked)
@@ -439,50 +448,63 @@ public class SlapCombatManager : MonoBehaviour
             return;
         }
 
-        bool blocked = false;
-        if (pendingHitDefender != null)
-        {
-            var expected = MirrorForOpponent(pendingHitDir);
-            if (pendingHitDefender.IsDefenderBlocking() &&
-                pendingHitDefender.GetCurrentBlockDirection() == expected)
-            {
-                blocked = true;
-            }
-        }
-        bool perfect = IsPerfectBlock(pendingHitDefender, pendingHitDir);
-        float slapProgress = pendingHitAttacker.GetSlapProgress01();
-        float resolveAtProgress = GetResolveAtProgress(pendingHitDir, blocked || perfect);
+        bool blockDirMatched = IsStrictBlockDirectionMatched(pendingHitDefender, pendingHitDir);
+        float slapProgress = Mathf.Clamp01(pendingHitAttacker.GetSlapProgress01());
+        float resolveAtProgress = Mathf.Max(
+            GetResolveAtProgress(pendingHitDir, blockDirMatched),
+            PerfectBlockProgressThreshold01);
         if (slapProgress < resolveAtProgress)
         {
             return;
         }
 
-        if (blocked || perfect)
-        {
-            pendingHitAttacker.InterruptSlapForSuccessfulBlock(blockedHitResolveProgress);
-        }
-        float baseDamagePercent = pendingDamagePercent;
-        float damagePercent = baseDamagePercent;
-
-        if (perfect || blocked)
-        {
-            damagePercent = 0f;
-            if (perfect)
-            {
-                perfectTimer = Mathf.Max(perfectTimer, perfectTextSeconds);
-            }
-        }
+        float windupStrength = pendingWindup01 * StrengthMaxPerComponent;
+        float swipeStrength = pendingSlapPower01 * StrengthMaxPerComponent;
+        float attackStrength = Mathf.Clamp(windupStrength + swipeStrength, 0f, AttackStrengthMax);
 
         var attackerStats = GetStats(pendingHitAttacker);
         var defenderStats = GetStats(pendingHitDefender);
+
+        float blockStrength = 0f;
+        if (pendingHitDefender != null && blockDirMatched)
+        {
+            blockStrength = Mathf.Clamp01(pendingHitDefender.GetDefenderBlockHold01()) * StrengthMaxPerComponent;
+            if (pendingFirstStrictBlockProgress01 < 0f && blockStrength > 0.001f)
+            {
+                pendingFirstStrictBlockProgress01 = slapProgress;
+            }
+        }
+
+        float stamina01 = defenderStats != null && defenderStats.MaxStamina > 0.01f
+            ? Mathf.Clamp01(defenderStats.Stamina / defenderStats.MaxStamina)
+            : 1f;
+        float effectiveBlockStrength = blockStrength * Mathf.Lerp(0.8f, 1.0f, stamina01);
+        float effectiveBlockOnAttackScale = effectiveBlockStrength * 2f;
+
+        float damageStrength = blockDirMatched
+            ? Mathf.Max(0f, attackStrength - effectiveBlockOnAttackScale)
+            : attackStrength;
+        float baseDamagePercent = (attackStrength / AttackStrengthMax) * damagePercentScale;
+        float damagePercent = (damageStrength / AttackStrengthMax) * damagePercentScale;
+
+        bool blocked = blockDirMatched && blockStrength > 0.001f;
+        bool perfect = blocked && IsPerfectBlock(blockDirMatched);
+        if (blocked)
+        {
+            pendingHitAttacker.InterruptSlapForSuccessfulBlock(blockedHitResolveProgress);
+        }
+        if (perfect)
+        {
+            perfectTimer = Mathf.Max(perfectTimer, perfectTextSeconds);
+            if (defenderStats != null)
+            {
+                defenderStats.RecoverStamina(defenderStats.MaxStamina * 0.10f);
+            }
+        }
+
         float attackerStaminaBefore = attackerStats != null ? attackerStats.Stamina : 0f;
         float attackerStaminaAfter = attackerStaminaBefore;
         bool attackerExhaustedDamagePenalty = false;
-        if (attackerStats != null && attackerStats.Stamina <= 0f && attackerStats.Health > 0f)
-        {
-            attackerExhaustedDamagePenalty = true;
-            damagePercent *= 0.5f;
-        }
 
         float defenderHealthBefore = defenderStats != null ? defenderStats.Health : 0f;
         float defenderHealthAfter = defenderHealthBefore;
@@ -567,7 +589,13 @@ public class SlapCombatManager : MonoBehaviour
             attackerStaminaBefore = attackerStaminaBefore,
             attackerStaminaAfter = attackerStaminaAfter,
             defenderHealthBefore = defenderHealthBefore,
-            defenderHealthAfter = defenderHealthAfter
+            defenderHealthAfter = defenderHealthAfter,
+            attackStrength = attackStrength,
+            blockStrength = blockStrength,
+            effectiveBlockStrength = effectiveBlockStrength,
+            stamina01 = stamina01,
+            wasPerfect = perfect,
+            blockDirMatched = blockDirMatched
         });
 
         pendingHit = false;
@@ -1520,18 +1548,79 @@ public class SlapCombatManager : MonoBehaviour
         startButtonStyle.fontStyle = FontStyle.Bold;
     }
 
+    private void EnsureDifficultyStyles()
+    {
+        if (difficultyLabelStyle == null)
+        {
+            difficultyLabelStyle = new GUIStyle(GUI.skin.label);
+            difficultyLabelStyle.alignment = TextAnchor.MiddleCenter;
+            difficultyLabelStyle.fontSize = 36;
+            difficultyLabelStyle.fontStyle = FontStyle.Bold;
+            difficultyLabelStyle.normal.textColor = Color.white;
+        }
+
+        if (difficultyButtonStyle == null)
+        {
+            difficultyButtonStyle = new GUIStyle(GUI.skin.button);
+            difficultyButtonStyle.alignment = TextAnchor.MiddleCenter;
+            difficultyButtonStyle.fontSize = 34;
+            difficultyButtonStyle.fontStyle = FontStyle.Bold;
+        }
+
+        if (difficultyButtonSelectedStyle == null)
+        {
+            difficultyButtonSelectedStyle = new GUIStyle(difficultyButtonStyle);
+            difficultyButtonSelectedStyle.normal.textColor = Color.white;
+            difficultyButtonSelectedStyle.normal.background = Texture2D.whiteTexture;
+        }
+    }
+
     private void DrawStartButton()
     {
         EnsureStartButtonStyle();
+        EnsureDifficultyStyles();
         float w = Mathf.Clamp(Screen.width * 0.68f, 440f, 920f);
         float h = Mathf.Clamp(Screen.height * 0.28f, 180f, 340f);
         float x = (Screen.width - w) * 0.5f;
         float y = (Screen.height - h) * 0.5f;
+        DrawDifficultySelector(y);
         var rect = new Rect(x, y, w, h);
         if (GUI.Button(rect, "SLAP", startButtonStyle))
         {
             StartBattle();
         }
+    }
+
+    private void DrawDifficultySelector(float startButtonY)
+    {
+        GameDifficulty selected = GameSettings.SelectedDifficulty;
+        float rowW = Mathf.Clamp(Screen.width * 0.62f, 460f, 920f);
+        float rowX = (Screen.width - rowW) * 0.5f;
+        float titleY = startButtonY - 130f;
+        var titleRect = new Rect(rowX, titleY, rowW, 44f);
+        GUI.Label(titleRect, "Difficulty", difficultyLabelStyle);
+
+        float spacing = 12f;
+        float buttonH = 58f;
+        float buttonW = (rowW - (spacing * 2f)) / 3f;
+        float buttonY = titleY + 52f;
+        DrawDifficultyButton(new Rect(rowX, buttonY, buttonW, buttonH), GameDifficulty.Easy, selected);
+        DrawDifficultyButton(new Rect(rowX + buttonW + spacing, buttonY, buttonW, buttonH), GameDifficulty.Normal, selected);
+        DrawDifficultyButton(new Rect(rowX + ((buttonW + spacing) * 2f), buttonY, buttonW, buttonH), GameDifficulty.Hard, selected);
+    }
+
+    private void DrawDifficultyButton(Rect rect, GameDifficulty difficulty, GameDifficulty selected)
+    {
+        bool isSelected = difficulty == selected;
+        Color prevColor = GUI.color;
+        if (isSelected)
+        {
+            GUI.color = new Color(0.15f, 0.4f, 0.9f, 0.95f);
+        }
+        bool clicked = GUI.Button(rect, difficulty.ToString(), isSelected ? difficultyButtonSelectedStyle : difficultyButtonStyle);
+        GUI.color = prevColor;
+        if (!clicked) return;
+        GameSettings.SelectedDifficulty = difficulty;
     }
 
     private void DrainStamina()
@@ -1543,8 +1632,15 @@ public class SlapCombatManager : MonoBehaviour
         if (attackerStats != null && attacker != null && attacker.IsAttackerWindupHolding())
         {
             float rate = attackerStats.MaxStamina / Mathf.Max(0.01f, staminaDrainSeconds);
+            float windupHoldSeconds = Mathf.Max(0f, attacker.GetWindupHoldSeconds());
+            float multiplier = 1f;
+            if (windupHoldSeconds > 0.45f)
+            {
+                multiplier += ((windupHoldSeconds - 0.45f) / 1.2f) * 0.65f;
+            }
+            multiplier = Mathf.Clamp(multiplier, 0.85f, 1.65f);
             float before = attackerStats.Stamina;
-            float spent = attackerStats.SpendStamina(rate * Time.deltaTime);
+            float spent = attackerStats.SpendStamina(rate * multiplier * Time.deltaTime);
             if (spent > 0f)
             {
                 OnStaminaDrained?.Invoke(new StaminaDrainEvent
@@ -1553,6 +1649,7 @@ public class SlapCombatManager : MonoBehaviour
                     reason = "attacker_windup",
                     amount = spent,
                     ratePerSecond = rate,
+                    drainMultiplier = multiplier,
                     staminaBefore = before,
                     staminaAfter = attackerStats.Stamina
                 });
@@ -1561,8 +1658,15 @@ public class SlapCombatManager : MonoBehaviour
         if (defenderStats != null && defender != null && defender.IsDefenderBlocking())
         {
             float rate = defenderStats.MaxStamina / Mathf.Max(0.01f, staminaDrainSeconds);
+            float blockHoldSeconds = Mathf.Max(0f, defender.GetDefenderBlockHoldSeconds());
+            float multiplier = 1f;
+            if (blockHoldSeconds > 0.35f)
+            {
+                multiplier += ((blockHoldSeconds - 0.35f) / 1.0f) * 0.75f;
+            }
+            multiplier = Mathf.Clamp(multiplier, 0.75f, 1.75f);
             float before = defenderStats.Stamina;
-            float spent = defenderStats.SpendStamina(rate * Time.deltaTime);
+            float spent = defenderStats.SpendStamina(rate * multiplier * Time.deltaTime);
             if (spent > 0f)
             {
                 OnStaminaDrained?.Invoke(new StaminaDrainEvent
@@ -1571,6 +1675,7 @@ public class SlapCombatManager : MonoBehaviour
                     reason = "defender_block",
                     amount = spent,
                     ratePerSecond = rate,
+                    drainMultiplier = multiplier,
                     staminaBefore = before,
                     staminaAfter = defenderStats.Stamina
                 });
@@ -1884,7 +1989,9 @@ public class SlapCombatManager : MonoBehaviour
         pendingHit = false;
         pendingHitAttacker = null;
         pendingHitDefender = null;
-        pendingDamagePercent = 0f;
+        pendingWindup01 = 0f;
+        pendingSlapPower01 = 0f;
+        pendingFirstStrictBlockProgress01 = -1f;
         pendingHitDir = SlapMechanics.SlapDirection.None;
         pendingBlockedDir = SlapMechanics.SlapDirection.None;
         pendingTurnSwitch = false;

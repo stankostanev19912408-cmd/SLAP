@@ -55,6 +55,32 @@ public class SlapFightTraceRecorder : MonoBehaviour
     private float lastKnownAIStamina;
     private bool hasKnownPlayerStats;
     private bool hasKnownAIStats;
+    private float attackerWindupDrainMultiplierSum;
+    private int attackerWindupDrainMultiplierCount;
+    private float defenderBlockDrainMultiplierSum;
+    private int defenderBlockDrainMultiplierCount;
+    private const int HoldDurationSampleCap = 200;
+    private readonly System.Collections.Generic.List<float> playerBlockHoldDurations = new System.Collections.Generic.List<float>(HoldDurationSampleCap);
+    private readonly System.Collections.Generic.List<float> playerWindupHoldDurations = new System.Collections.Generic.List<float>(HoldDurationSampleCap);
+    private readonly System.Collections.Generic.List<float> aiBlockHoldDurations = new System.Collections.Generic.List<float>(HoldDurationSampleCap);
+    private readonly System.Collections.Generic.List<float> aiWindupHoldDurations = new System.Collections.Generic.List<float>(HoldDurationSampleCap);
+    private bool playerBlockHoldActive;
+    private float playerBlockHoldStartTime;
+    private bool playerWindupHoldActive;
+    private float playerWindupHoldStartTime;
+    private bool aiBlockHoldActive;
+    private float aiBlockHoldStartTime;
+    private bool aiWindupHoldActive;
+    private float aiWindupHoldStartTime;
+    private bool aiIgnoreReleaseTailAfterForcedClose;
+    private float aiPrevWindup01;
+    private float aiWindupChargeStartTime = -1f;
+    private float aiWindupPostStartTime = -1f;
+    private float aiCurrentWindupTarget01 = 1f;
+    private readonly System.Collections.Generic.List<float> aiWindupChargeSamples = new System.Collections.Generic.List<float>(HoldDurationSampleCap);
+    private readonly System.Collections.Generic.List<float> aiWindupPostSamples = new System.Collections.Generic.List<float>(HoldDurationSampleCap);
+    private float cachedStaminaDrainSeconds = 25f;
+    private string cachedStaminaDrainSecondsSource = "default";
 
     [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.AfterSceneLoad)]
     private static void Bootstrap()
@@ -138,8 +164,10 @@ public class SlapFightTraceRecorder : MonoBehaviour
             WriteCombatEvent("turn", playerTurn ? "player_attacker" : "ai_attacker");
         }
 
+        TrackHoldDurations(battleStarted);
         TrackStatChanges();
         TrackAIDecisions();
+        TrackAIWindupPhases(battleStarted);
 
         if (recordFrameSnapshots)
         {
@@ -182,6 +210,13 @@ public class SlapFightTraceRecorder : MonoBehaviour
     {
         if (!recording || writer == null) return;
 
+        if (ai != null && source == ai)
+        {
+            CloseAIWindupPostIfOpen(Time.unscaledTime);
+            aiWindupChargeStartTime = -1f;
+            aiWindupPostStartTime = -1f;
+        }
+
         var rec = new SlapEventRecord
         {
             type = "slap_fired",
@@ -202,6 +237,18 @@ public class SlapFightTraceRecorder : MonoBehaviour
     {
         if (!recording || writer == null) return;
 
+        float appliedMultiplier = data.drainMultiplier > 0f ? data.drainMultiplier : 1f;
+        if (string.Equals(data.reason, "attacker_windup", StringComparison.Ordinal))
+        {
+            attackerWindupDrainMultiplierSum += appliedMultiplier;
+            attackerWindupDrainMultiplierCount++;
+        }
+        else if (string.Equals(data.reason, "defender_block", StringComparison.Ordinal))
+        {
+            defenderBlockDrainMultiplierSum += appliedMultiplier;
+            defenderBlockDrainMultiplierCount++;
+        }
+
         var rec = new StaminaDrainRecord
         {
             type = "stamina_drain",
@@ -213,6 +260,7 @@ public class SlapFightTraceRecorder : MonoBehaviour
             reason = data.reason,
             amount = data.amount,
             ratePerSecond = data.ratePerSecond,
+            drainMultiplier = appliedMultiplier,
             staminaBefore = data.staminaBefore,
             staminaAfter = data.staminaAfter
         };
@@ -243,7 +291,13 @@ public class SlapFightTraceRecorder : MonoBehaviour
             attackerStaminaBefore = data.attackerStaminaBefore,
             attackerStaminaAfter = data.attackerStaminaAfter,
             defenderHealthBefore = data.defenderHealthBefore,
-            defenderHealthAfter = data.defenderHealthAfter
+            defenderHealthAfter = data.defenderHealthAfter,
+            attackStrength = data.attackStrength,
+            blockStrength = data.blockStrength,
+            effectiveBlockStrength = data.effectiveBlockStrength,
+            stamina01 = data.stamina01,
+            wasPerfect = data.wasPerfect,
+            blockDirMatched = data.blockDirMatched
         };
         WriteRecord(rec);
     }
@@ -267,6 +321,7 @@ public class SlapFightTraceRecorder : MonoBehaviour
         {
             player = combat.GetPlayer();
             ai = combat.GetAI();
+            RefreshCachedStaminaDrainSecondsFromCombat();
         }
 
         if (player != null && playerStats == null)
@@ -284,6 +339,18 @@ public class SlapFightTraceRecorder : MonoBehaviour
             {
                 aiController = ai.GetComponent<SlapAIController>();
             }
+        }
+    }
+
+    private void RefreshCachedStaminaDrainSecondsFromCombat()
+    {
+        if (combat == null) return;
+
+        float drainSeconds = combat.GetStaminaDrainSeconds();
+        if (drainSeconds > 0f)
+        {
+            cachedStaminaDrainSeconds = drainSeconds;
+            cachedStaminaDrainSecondsSource = "combatManager";
         }
     }
 
@@ -305,6 +372,31 @@ public class SlapFightTraceRecorder : MonoBehaviour
             hasLoggedStart = false;
             hasStatSnapshot = false;
             hasAIDecisionSnapshot = false;
+            attackerWindupDrainMultiplierSum = 0f;
+            attackerWindupDrainMultiplierCount = 0;
+            defenderBlockDrainMultiplierSum = 0f;
+            defenderBlockDrainMultiplierCount = 0;
+            playerBlockHoldDurations.Clear();
+            playerWindupHoldDurations.Clear();
+            aiBlockHoldDurations.Clear();
+            aiWindupHoldDurations.Clear();
+            playerBlockHoldActive = false;
+            playerBlockHoldStartTime = 0f;
+            playerWindupHoldActive = false;
+            playerWindupHoldStartTime = 0f;
+            aiBlockHoldActive = false;
+            aiBlockHoldStartTime = 0f;
+            aiWindupHoldActive = false;
+            aiWindupHoldStartTime = 0f;
+            aiIgnoreReleaseTailAfterForcedClose = false;
+            aiPrevWindup01 = 0f;
+            aiWindupChargeStartTime = -1f;
+            aiWindupPostStartTime = -1f;
+            aiCurrentWindupTarget01 = 1f;
+            aiWindupChargeSamples.Clear();
+            aiWindupPostSamples.Clear();
+            cachedStaminaDrainSeconds = 25f;
+            cachedStaminaDrainSecondsSource = "default";
 
             if (logPathToConsole)
             {
@@ -359,6 +451,31 @@ public class SlapFightTraceRecorder : MonoBehaviour
         lastObservedFrame = 0;
         hasKnownPlayerStats = false;
         hasKnownAIStats = false;
+        attackerWindupDrainMultiplierSum = 0f;
+        attackerWindupDrainMultiplierCount = 0;
+        defenderBlockDrainMultiplierSum = 0f;
+        defenderBlockDrainMultiplierCount = 0;
+        playerBlockHoldDurations.Clear();
+        playerWindupHoldDurations.Clear();
+        aiBlockHoldDurations.Clear();
+        aiWindupHoldDurations.Clear();
+        playerBlockHoldActive = false;
+        playerBlockHoldStartTime = 0f;
+        playerWindupHoldActive = false;
+        playerWindupHoldStartTime = 0f;
+        aiBlockHoldActive = false;
+        aiBlockHoldStartTime = 0f;
+        aiWindupHoldActive = false;
+        aiWindupHoldStartTime = 0f;
+        aiIgnoreReleaseTailAfterForcedClose = false;
+        aiPrevWindup01 = 0f;
+        aiWindupChargeStartTime = -1f;
+        aiWindupPostStartTime = -1f;
+        aiCurrentWindupTarget01 = 1f;
+        aiWindupChargeSamples.Clear();
+        aiWindupPostSamples.Clear();
+        cachedStaminaDrainSeconds = 25f;
+        cachedStaminaDrainSecondsSource = "default";
     }
 
     private bool IsGameOver()
@@ -405,6 +522,136 @@ public class SlapFightTraceRecorder : MonoBehaviour
         EmitStatDelta("ai_stamina", aiStats.Stamina, ref lastAIStamina);
     }
 
+    private void TrackHoldDurations(bool battleStarted)
+    {
+        float now = Time.unscaledTime;
+        bool trackNow = battleStarted && player != null && ai != null;
+        bool aiForcedBlockRelease = aiController != null && aiController.ConsumeForcedBlockReleaseSignal();
+        if (aiForcedBlockRelease)
+        {
+            aiIgnoreReleaseTailAfterForcedClose = true;
+        }
+        if (ai != null && aiIgnoreReleaseTailAfterForcedClose && !ai.IsDefenderBlockReleasing())
+        {
+            aiIgnoreReleaseTailAfterForcedClose = false;
+        }
+        bool aiIgnoreReleaseTail = ai != null &&
+                                   aiIgnoreReleaseTailAfterForcedClose &&
+                                   ai.IsDefenderBlockReleasing() &&
+                                   !ai.IsDefenderBlocking();
+
+        UpdateHoldSegment(player, trackNow, now, ref playerBlockHoldActive, ref playerBlockHoldStartTime, playerBlockHoldDurations, isBlock: true);
+        UpdateHoldSegment(player, trackNow, now, ref playerWindupHoldActive, ref playerWindupHoldStartTime, playerWindupHoldDurations, isBlock: false);
+        UpdateHoldSegment(ai, trackNow, now, ref aiBlockHoldActive, ref aiBlockHoldStartTime, aiBlockHoldDurations, isBlock: true, forceCloseNow: aiForcedBlockRelease, ignoreReleaseTail: aiIgnoreReleaseTail);
+        UpdateHoldSegment(ai, trackNow, now, ref aiWindupHoldActive, ref aiWindupHoldStartTime, aiWindupHoldDurations, isBlock: false);
+    }
+
+    private static void UpdateHoldSegment(
+        SlapMechanics actor,
+        bool trackNow,
+        float now,
+        ref bool active,
+        ref float startTime,
+        System.Collections.Generic.List<float> sink,
+        bool isBlock,
+        bool forceCloseNow = false,
+        bool ignoreReleaseTail = false)
+    {
+        if (forceCloseNow)
+        {
+            if (active)
+            {
+                float forcedDuration = Mathf.Max(0f, now - startTime);
+                AddDurationSample(sink, forcedDuration);
+                active = false;
+                startTime = 0f;
+            }
+            return;
+        }
+
+        bool current = false;
+        if (trackNow && actor != null)
+        {
+            if (isBlock)
+            {
+                bool blocking = actor.IsDefenderBlocking();
+                bool releasing = actor.IsDefenderBlockReleasing();
+                current = blocking || releasing;
+                if (ignoreReleaseTail && releasing && !blocking)
+                {
+                    current = false;
+                }
+            }
+            else
+            {
+                current = actor.IsAttackerWindupHolding();
+            }
+        }
+
+        if (current)
+        {
+            if (!active)
+            {
+                active = true;
+                startTime = now;
+            }
+            return;
+        }
+
+        if (!active) return;
+        float duration = Mathf.Max(0f, now - startTime);
+        AddDurationSample(sink, duration);
+        active = false;
+        startTime = 0f;
+    }
+
+    private static void AddDurationSample(System.Collections.Generic.List<float> sink, float duration)
+    {
+        if (sink == null) return;
+        float value = Mathf.Max(0f, duration);
+        if (value <= 0.0001f) return;
+        sink.Add(value);
+        if (sink.Count > HoldDurationSampleCap)
+        {
+            sink.RemoveAt(0);
+        }
+    }
+
+    private static float CalculateAverage(System.Collections.Generic.List<float> samples)
+    {
+        if (samples == null || samples.Count <= 0) return 0f;
+        float sum = 0f;
+        for (int i = 0; i < samples.Count; i++)
+        {
+            sum += Mathf.Max(0f, samples[i]);
+        }
+        return sum / samples.Count;
+    }
+
+    private static float CalculateP90(System.Collections.Generic.List<float> samples)
+    {
+        if (samples == null || samples.Count <= 0) return 0f;
+        var copy = new System.Collections.Generic.List<float>(samples.Count);
+        for (int i = 0; i < samples.Count; i++)
+        {
+            copy.Add(Mathf.Max(0f, samples[i]));
+        }
+        copy.Sort();
+        int index = Mathf.Clamp(Mathf.FloorToInt(0.9f * (copy.Count - 1)), 0, copy.Count - 1);
+        return copy[index];
+    }
+
+    private static float CalculateMax(System.Collections.Generic.List<float> samples)
+    {
+        if (samples == null || samples.Count <= 0) return 0f;
+        float max = 0f;
+        for (int i = 0; i < samples.Count; i++)
+        {
+            max = Mathf.Max(max, Mathf.Max(0f, samples[i]));
+        }
+        return max;
+    }
+
     private void EmitStatDelta(string metric, float currentValue, ref float lastValue)
     {
         float delta = currentValue - lastValue;
@@ -430,12 +677,14 @@ public class SlapFightTraceRecorder : MonoBehaviour
         if (aiController == null || !recording) return;
 
         var snap = aiController.GetDebugSnapshot();
+        aiCurrentWindupTarget01 = Mathf.Clamp(snap.windupTarget, 0.05f, 1f);
         bool changed = !hasAIDecisionSnapshot ||
                        !string.Equals(lastAIDecision.state, snap.state, StringComparison.Ordinal) ||
                        !string.Equals(lastAIDecision.reason, snap.reason, StringComparison.Ordinal) ||
                        !string.Equals(lastAIDecision.chosenAttackDir, snap.chosenAttackDir, StringComparison.Ordinal) ||
                        !string.Equals(lastAIDecision.chosenAttackReason, snap.chosenAttackReason, StringComparison.Ordinal) ||
                        !string.Equals(lastAIDecision.skillBand, snap.skillBand, StringComparison.Ordinal) ||
+                       !string.Equals(lastAIDecision.selectedDifficulty, snap.selectedDifficulty, StringComparison.Ordinal) ||
                        !string.Equals(lastAIDecision.expectedBlockDir, snap.expectedBlockDir, StringComparison.Ordinal) ||
                        !string.Equals(lastAIDecision.blockDir, snap.blockDir, StringComparison.Ordinal) ||
                        Mathf.Abs(lastAIDecision.playerSkillFast - snap.playerSkillFast) > 0.0001f ||
@@ -446,11 +695,20 @@ public class SlapFightTraceRecorder : MonoBehaviour
                        lastAIDecision.playerSameBlockStreak != snap.playerSameBlockStreak ||
                        Mathf.Abs(lastAIDecision.explorationProb - snap.explorationProb) > 0.0001f ||
                        Mathf.Abs(lastAIDecision.greedyProb - snap.greedyProb) > 0.0001f ||
+                       Mathf.Abs(lastAIDecision.greedyProbMultiplier - snap.greedyProbMultiplier) > 0.0001f ||
+                       Mathf.Abs(lastAIDecision.swipeSpeedMultiplier - snap.swipeSpeedMultiplier) > 0.0001f ||
+                       Mathf.Abs(lastAIDecision.attackCooldownAdd - snap.attackCooldownAdd) > 0.0001f ||
                        Mathf.Abs(lastAIDecision.tunedReactToWindupFrom01 - snap.tunedReactToWindupFrom01) > 0.0001f ||
                        Mathf.Abs(lastAIDecision.tunedBlockRaiseDelaySeconds - snap.tunedBlockRaiseDelaySeconds) > 0.0001f ||
                        Mathf.Abs(lastAIDecision.tunedBlockMistakeChance - snap.tunedBlockMistakeChance) > 0.0001f ||
                        Mathf.Abs(lastAIDecision.tunedLatchHoldExtraSeconds - snap.tunedLatchHoldExtraSeconds) > 0.0001f ||
                        Mathf.Abs(lastAIDecision.greedyVulnerabilityRemaining - snap.greedyVulnerabilityRemaining) > 0.0001f ||
+                       Mathf.Abs(lastAIDecision.minWindupDuration - snap.minWindupDuration) > 0.0001f ||
+                       Mathf.Abs(lastAIDecision.minPostHold - snap.minPostHold) > 0.0001f ||
+                       lastAIDecision.minWindupDurationApplied != snap.minWindupDurationApplied ||
+                       lastAIDecision.minPostHoldApplied != snap.minPostHoldApplied ||
+                       Mathf.Abs(lastAIDecision.playerAvgBlockHoldSecondsLast10 - snap.playerAvgBlockHoldSecondsLast10) > 0.0001f ||
+                       Mathf.Abs(lastAIDecision.playerAvgWindupHoldSecondsLast10 - snap.playerAvgWindupHoldSecondsLast10) > 0.0001f ||
                        Mathf.Abs(lastAIDecision.aiSwipeSpeedLast - snap.aiSwipeSpeedLast) > 0.0001f ||
                        lastAIDecision.immediateThreat != snap.immediateThreat ||
                        lastAIDecision.keepBlockByThreatRules != snap.keepBlockByThreatRules ||
@@ -470,6 +728,47 @@ public class SlapFightTraceRecorder : MonoBehaviour
             snapshot = ToAIFrame(snap)
         };
         WriteRecord(rec);
+    }
+
+    private void TrackAIWindupPhases(bool battleStarted)
+    {
+        float now = Time.unscaledTime;
+        float windup01 = 0f;
+        if (battleStarted && ai != null)
+        {
+            windup01 = Mathf.Clamp01(ai.GetDebugWindup01());
+        }
+
+        if (aiPrevWindup01 < 0.02f && windup01 >= 0.02f)
+        {
+            aiWindupChargeStartTime = now;
+            aiWindupPostStartTime = -1f;
+        }
+
+        float targetThreshold = Mathf.Clamp01(aiCurrentWindupTarget01 - 0.01f);
+        if (windup01 >= targetThreshold && aiWindupChargeStartTime >= 0f && aiWindupPostStartTime < 0f)
+        {
+            AddDurationSample(aiWindupChargeSamples, now - aiWindupChargeStartTime);
+            aiWindupPostStartTime = now;
+        }
+
+        bool windupDropped = windup01 < 0.02f && aiPrevWindup01 >= 0.02f;
+        if (windupDropped)
+        {
+            CloseAIWindupPostIfOpen(now);
+            aiWindupChargeStartTime = -1f;
+            aiWindupPostStartTime = -1f;
+        }
+
+        aiPrevWindup01 = windup01;
+    }
+
+    private void CloseAIWindupPostIfOpen(float now)
+    {
+        if (aiWindupPostStartTime >= 0f)
+        {
+            AddDurationSample(aiWindupPostSamples, now - aiWindupPostStartTime);
+        }
     }
 
     private void WriteFrameSnapshot(bool battleStarted, bool waitingResolve, bool playerTurn)
@@ -569,6 +868,7 @@ public class SlapFightTraceRecorder : MonoBehaviour
             playerSkillSlow = snap.playerSkillSlow,
             playerSkill = snap.playerSkill,
             aiDifficulty = snap.aiDifficulty,
+            selectedDifficulty = snap.selectedDifficulty,
             patternConfidence = snap.patternConfidence,
             playerSameBlockStreak = snap.playerSameBlockStreak,
             aiSwipeSpeedLast = snap.aiSwipeSpeedLast,
@@ -577,11 +877,20 @@ public class SlapFightTraceRecorder : MonoBehaviour
             chosenAttackReason = snap.chosenAttackReason,
             explorationProb = snap.explorationProb,
             greedyProb = snap.greedyProb,
+            greedyProbMultiplier = snap.greedyProbMultiplier,
+            swipeSpeedMultiplier = snap.swipeSpeedMultiplier,
+            attackCooldownAdd = snap.attackCooldownAdd,
             tunedReactToWindupFrom01 = snap.tunedReactToWindupFrom01,
             tunedBlockRaiseDelaySeconds = snap.tunedBlockRaiseDelaySeconds,
             tunedBlockMistakeChance = snap.tunedBlockMistakeChance,
             tunedLatchHoldExtraSeconds = snap.tunedLatchHoldExtraSeconds,
             greedyVulnerabilityRemaining = snap.greedyVulnerabilityRemaining,
+            minWindupDuration = snap.minWindupDuration,
+            minPostHold = snap.minPostHold,
+            minWindupDurationApplied = snap.minWindupDurationApplied,
+            minPostHoldApplied = snap.minPostHoldApplied,
+            playerAvgBlockHoldSecondsLast10 = snap.playerAvgBlockHoldSecondsLast10,
+            playerAvgWindupHoldSecondsLast10 = snap.playerAvgWindupHoldSecondsLast10,
             reason = snap.reason
         };
     }
@@ -589,6 +898,7 @@ public class SlapFightTraceRecorder : MonoBehaviour
     private void WriteSessionStart()
     {
         hasLoggedStart = true;
+        RefreshCachedStaminaDrainSecondsFromCombat();
         var rec = new SessionStartRecord
         {
             type = "session_start",
@@ -611,6 +921,8 @@ public class SlapFightTraceRecorder : MonoBehaviour
     private void WriteSessionEnd(string reason)
     {
         if (writer == null) return;
+        TrackHoldDurations(false);
+        TrackAIWindupPhases(false);
 
         float realtime = Time.realtimeSinceStartup;
         int frame = Time.frameCount;
@@ -627,13 +939,43 @@ public class SlapFightTraceRecorder : MonoBehaviour
         float aiHealth = hasKnownAIStats ? lastKnownAIHealth : (aiStats != null ? aiStats.Health : 0f);
         float playerStamina = hasKnownPlayerStats ? lastKnownPlayerStamina : (playerStats != null ? playerStats.Stamina : 0f);
         float aiStamina = hasKnownAIStats ? lastKnownAIStamina : (aiStats != null ? aiStats.Stamina : 0f);
-        float configuredStaminaDrainSeconds = combat != null ? combat.GetStaminaDrainSeconds() : 0f;
+        float configuredStaminaDrainSeconds = cachedStaminaDrainSeconds;
+        string staminaDrainSecondsSource = cachedStaminaDrainSecondsSource;
         float maxStaminaBasis = 0f;
         if (playerStats != null) maxStaminaBasis = playerStats.MaxStamina;
         else if (aiStats != null) maxStaminaBasis = aiStats.MaxStamina;
         float drainRateSTAperSec = configuredStaminaDrainSeconds > 0.0001f
             ? maxStaminaBasis / configuredStaminaDrainSeconds
             : 0f;
+        float avgDrainMultiplierAttackerWindup = attackerWindupDrainMultiplierCount > 0
+            ? attackerWindupDrainMultiplierSum / attackerWindupDrainMultiplierCount
+            : 0f;
+        float avgDrainMultiplierDefenderBlock = defenderBlockDrainMultiplierCount > 0
+            ? defenderBlockDrainMultiplierSum / defenderBlockDrainMultiplierCount
+            : 0f;
+        float playerAvgBlockHoldSeconds = CalculateAverage(playerBlockHoldDurations);
+        float playerAvgWindupHoldSeconds = CalculateAverage(playerWindupHoldDurations);
+        float aiAvgBlockHoldSeconds = CalculateAverage(aiBlockHoldDurations);
+        float aiAvgWindupHoldSeconds = CalculateAverage(aiWindupHoldDurations);
+        float playerP90BlockHoldSeconds = CalculateP90(playerBlockHoldDurations);
+        float playerP90WindupHoldSeconds = CalculateP90(playerWindupHoldDurations);
+        float aiP90BlockHoldSeconds = CalculateP90(aiBlockHoldDurations);
+        float aiP90WindupHoldSeconds = CalculateP90(aiWindupHoldDurations);
+        float aiMaxBlockHoldSeconds = CalculateMax(aiBlockHoldDurations);
+        float aiMaxWindupHoldSeconds = CalculateMax(aiWindupHoldDurations);
+        float aiAvgWindupChargeSeconds = CalculateAverage(aiWindupChargeSamples);
+        float aiP90WindupChargeSeconds = CalculateP90(aiWindupChargeSamples);
+        float aiAvgWindupPostHoldSeconds = CalculateAverage(aiWindupPostSamples);
+        float aiP90WindupPostHoldSeconds = CalculateP90(aiWindupPostSamples);
+        float minWindupDuration = aiController != null ? aiController.GetMinWindupDurationSecondsForTelemetry() : 0f;
+        float minPostHold = aiController != null ? aiController.GetMinPostHoldSecondsForTelemetry() : 0f;
+        string selectedDifficulty = aiController != null ? aiController.GetCurrentDifficultyLabel() : GameSettings.GetDifficultyLabel(GameSettings.SelectedDifficulty);
+        float swipeSpeedMultiplier = aiController != null ? aiController.GetSwipeSpeedMultiplierForTelemetry() : 1f;
+        float explorationProb = aiController != null ? aiController.GetExplorationProbForTelemetry() : 0.30f;
+        float greedyProbMultiplier = aiController != null ? aiController.GetGreedyProbMultiplierForTelemetry() : 1f;
+        float attackCooldownAdd = aiController != null ? aiController.GetAttackCooldownAddForTelemetry() : 0f;
+        bool minWindupDurationApplied = aiController != null && aiController.GetMinWindupDurationAppliedAny();
+        bool minPostHoldApplied = aiController != null && aiController.GetMinPostHoldAppliedAny();
 
         var rec = new SessionEndRecord
         {
@@ -649,7 +991,34 @@ public class SlapFightTraceRecorder : MonoBehaviour
             playerStamina = playerStamina,
             aiStamina = aiStamina,
             staminaDrainSeconds = configuredStaminaDrainSeconds,
+            staminaDrainSecondsSource = staminaDrainSecondsSource,
+            maxStaminaBasisUsed = maxStaminaBasis,
             drainRateSTAperSec = drainRateSTAperSec,
+            avgDrainMultiplierAttackerWindup = avgDrainMultiplierAttackerWindup,
+            avgDrainMultiplierDefenderBlock = avgDrainMultiplierDefenderBlock,
+            playerAvgBlockHoldSeconds = playerAvgBlockHoldSeconds,
+            playerAvgWindupHoldSeconds = playerAvgWindupHoldSeconds,
+            aiAvgBlockHoldSeconds = aiAvgBlockHoldSeconds,
+            aiAvgWindupHoldSeconds = aiAvgWindupHoldSeconds,
+            playerP90BlockHoldSeconds = playerP90BlockHoldSeconds,
+            playerP90WindupHoldSeconds = playerP90WindupHoldSeconds,
+            aiP90BlockHoldSeconds = aiP90BlockHoldSeconds,
+            aiP90WindupHoldSeconds = aiP90WindupHoldSeconds,
+            aiMaxBlockHoldSeconds = aiMaxBlockHoldSeconds,
+            aiMaxWindupHoldSeconds = aiMaxWindupHoldSeconds,
+            aiAvgWindupChargeSeconds = aiAvgWindupChargeSeconds,
+            aiP90WindupChargeSeconds = aiP90WindupChargeSeconds,
+            aiAvgWindupPostHoldSeconds = aiAvgWindupPostHoldSeconds,
+            aiP90WindupPostHoldSeconds = aiP90WindupPostHoldSeconds,
+            selectedDifficulty = selectedDifficulty,
+            minWindupDuration = minWindupDuration,
+            minPostHold = minPostHold,
+            swipeSpeedMultiplier = swipeSpeedMultiplier,
+            explorationProb = explorationProb,
+            greedyProbMultiplier = greedyProbMultiplier,
+            attackCooldownAdd = attackCooldownAdd,
+            minWindupDurationApplied = minWindupDurationApplied,
+            minPostHoldApplied = minPostHoldApplied,
             samplesWritten = sampleIndex
         };
         WriteRecord(rec);
@@ -724,7 +1093,34 @@ public class SlapFightTraceRecorder : MonoBehaviour
         public float playerStamina;
         public float aiStamina;
         public float staminaDrainSeconds;
+        public string staminaDrainSecondsSource;
+        public float maxStaminaBasisUsed;
         public float drainRateSTAperSec;
+        public float avgDrainMultiplierAttackerWindup;
+        public float avgDrainMultiplierDefenderBlock;
+        public float playerAvgBlockHoldSeconds;
+        public float playerAvgWindupHoldSeconds;
+        public float aiAvgBlockHoldSeconds;
+        public float aiAvgWindupHoldSeconds;
+        public float playerP90BlockHoldSeconds;
+        public float playerP90WindupHoldSeconds;
+        public float aiP90BlockHoldSeconds;
+        public float aiP90WindupHoldSeconds;
+        public float aiMaxBlockHoldSeconds;
+        public float aiMaxWindupHoldSeconds;
+        public float aiAvgWindupChargeSeconds;
+        public float aiP90WindupChargeSeconds;
+        public float aiAvgWindupPostHoldSeconds;
+        public float aiP90WindupPostHoldSeconds;
+        public string selectedDifficulty;
+        public float minWindupDuration;
+        public float minPostHold;
+        public float swipeSpeedMultiplier;
+        public float explorationProb;
+        public float greedyProbMultiplier;
+        public float attackCooldownAdd;
+        public bool minWindupDurationApplied;
+        public bool minPostHoldApplied;
         public int samplesWritten;
     }
 
@@ -764,6 +1160,7 @@ public class SlapFightTraceRecorder : MonoBehaviour
         public string reason;
         public float amount;
         public float ratePerSecond;
+        public float drainMultiplier;
         public float staminaBefore;
         public float staminaAfter;
     }
@@ -790,6 +1187,12 @@ public class SlapFightTraceRecorder : MonoBehaviour
         public float attackerStaminaAfter;
         public float defenderHealthBefore;
         public float defenderHealthAfter;
+        public float attackStrength;
+        public float blockStrength;
+        public float effectiveBlockStrength;
+        public float stamina01;
+        public bool wasPerfect;
+        public bool blockDirMatched;
     }
 
     [Serializable]
@@ -904,6 +1307,7 @@ public class SlapFightTraceRecorder : MonoBehaviour
         public float playerSkillSlow;
         public float playerSkill;
         public float aiDifficulty;
+        public string selectedDifficulty;
         public float patternConfidence;
         public int playerSameBlockStreak;
         public float aiSwipeSpeedLast;
@@ -912,11 +1316,20 @@ public class SlapFightTraceRecorder : MonoBehaviour
         public string chosenAttackReason;
         public float explorationProb;
         public float greedyProb;
+        public float greedyProbMultiplier;
+        public float swipeSpeedMultiplier;
+        public float attackCooldownAdd;
         public float tunedReactToWindupFrom01;
         public float tunedBlockRaiseDelaySeconds;
         public float tunedBlockMistakeChance;
         public float tunedLatchHoldExtraSeconds;
         public float greedyVulnerabilityRemaining;
+        public float minWindupDuration;
+        public float minPostHold;
+        public bool minWindupDurationApplied;
+        public bool minPostHoldApplied;
+        public float playerAvgBlockHoldSecondsLast10;
+        public float playerAvgWindupHoldSecondsLast10;
         public string reason;
     }
 }
