@@ -2550,6 +2550,57 @@ public class SlapMechanics : MonoBehaviour
         return ToPublicDir(pendingDir);
     }
 
+    public bool TryGetHandWorldPose(
+        out Vector3 leftPosition,
+        out Quaternion leftRotation,
+        out Vector3 rightPosition,
+        out Quaternion rightRotation)
+    {
+        leftPosition = Vector3.zero;
+        leftRotation = Quaternion.identity;
+        rightPosition = Vector3.zero;
+        rightRotation = Quaternion.identity;
+
+        CacheAttackHandBonesIfNeeded();
+        bool hasAny = false;
+        if (attackLeftHandBone != null)
+        {
+            leftPosition = attackLeftHandBone.position;
+            leftRotation = attackLeftHandBone.rotation;
+            hasAny = true;
+        }
+        if (attackRightHandBone != null)
+        {
+            rightPosition = attackRightHandBone.position;
+            rightRotation = attackRightHandBone.rotation;
+            hasAny = true;
+        }
+        return hasAny;
+    }
+
+    public void GetHandMotionMagnitude(out float leftMotion, out float rightMotion)
+    {
+        leftMotion = 0f;
+        rightMotion = 0f;
+
+        CacheAttackHandBonesIfNeeded();
+        PinAttackHandStartIfNeeded();
+
+        if (attackLeftHandBone != null)
+        {
+            float pos = (attackLeftHandBone.localPosition - attackLeftHandStartLocalPos).sqrMagnitude;
+            float rot = Quaternion.Angle(attackLeftHandBone.localRotation, attackLeftHandStartLocalRot) / 180f;
+            leftMotion = pos + (rot * rot * 0.05f);
+        }
+
+        if (attackRightHandBone != null)
+        {
+            float pos = (attackRightHandBone.localPosition - attackRightHandStartLocalPos).sqrMagnitude;
+            float rot = Quaternion.Angle(attackRightHandBone.localRotation, attackRightHandStartLocalRot) / 180f;
+            rightMotion = pos + (rot * rot * 0.05f);
+        }
+    }
+
     public bool IsControlledHandMoving()
     {
         if (role == Role.Attacker)
@@ -2614,6 +2665,45 @@ public class SlapMechanics : MonoBehaviour
         }
 
         return VisualHand.None;
+    }
+
+    public bool IsDownAttackVisualActive()
+    {
+        if (role != Role.Attacker) return false;
+        if (currentWindupState == slapErcutWindup || currentSlapState == slapErcutSlap)
+        {
+            return true;
+        }
+
+        if (attackPhase == AttackPhase.WindupActive ||
+            attackPhase == AttackPhase.ReturningAfterWindup ||
+            attackPhase == AttackPhase.SlapActive)
+        {
+            return pendingDir == Dir.Down;
+        }
+
+        return false;
+    }
+
+    public bool IsVerticalAttackVisualActive()
+    {
+        if (role != Role.Attacker) return false;
+        if (currentWindupState == slapUpWindup ||
+            currentSlapState == slapUpSlap ||
+            currentWindupState == slapErcutWindup ||
+            currentSlapState == slapErcutSlap)
+        {
+            return true;
+        }
+
+        if (attackPhase == AttackPhase.WindupActive ||
+            attackPhase == AttackPhase.ReturningAfterWindup ||
+            attackPhase == AttackPhase.SlapActive)
+        {
+            return pendingDir == Dir.Up || pendingDir == Dir.Down;
+        }
+
+        return false;
     }
 
     public float GetControlledVisualProgress01()
@@ -3129,6 +3219,13 @@ public class SlapMechanics : MonoBehaviour
         SetWindupStates(d);
         if (string.IsNullOrEmpty(currentSlapState)) return;
         float currentHand = GetCurrentHandProgressForCombat();
+        float effectiveWindup = Mathf.Max(currentHand, maxProgress);
+        if (effectiveWindup < minWindupForSlap)
+        {
+            // Same gate as player input: AI cannot fire slap below minimal windup.
+            AI_SoftCancelWindup();
+            return;
+        }
         SetSlapSpeed(swipeSpeedCmPerSec);
         if (animator != null && !string.IsNullOrEmpty(slapSpeedParam))
         {
